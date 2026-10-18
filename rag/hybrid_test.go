@@ -130,7 +130,7 @@ func TestHybridAsToolDelegates(t *testing.T) {
 }
 
 func TestHybridLanePanicDegrades(t *testing.T) {
-	// 语义路 panic → FanInErr Slot.Panicked 记为该路失败，降级词料路（恐慌不出宿主进程）
+	// 语义路 panic → FanInErr Slot.Err 携带 *async.PanicError 记为该路失败，降级词料路（恐慌不出宿主进程）
 	h := NewHybrid(panicKS{}, fakeLocal(t))
 	got, err := h.Retrieve(context.Background(), "kubernetes", 3, nil)
 	if err != nil || len(got) == 0 {

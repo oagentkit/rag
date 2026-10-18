@@ -7,10 +7,12 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/oekit/concurrency/async"
 	"github.com/oekit/concurrency/syncx"
 )
 
@@ -44,9 +46,13 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 	var lists [][]Chunk
 	var firstErr error
 	for _, s := range slots {
+		// v0.7.0 起 panic 由 Slot.Err 承载 *async.PanicError（errors.As 可辨、
+		// 携带栈），Slot.Panicked 已废弃。区分 panic 与普通错误是为了给调用方
+		// 一个不同的错误文案——panic 是我们的 bug，普通错误是下游不可用。
 		err := s.Err
-		if s.Panicked != nil {
-			err = fmt.Errorf("rag: hybrid 检索路 panic: %v", s.Panicked)
+		var pe *async.PanicError
+		if errors.As(err, &pe) {
+			err = fmt.Errorf("rag: hybrid 检索路 panic: %w", pe)
 		}
 		if err != nil {
 			if firstErr == nil {
