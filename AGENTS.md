@@ -51,7 +51,7 @@
 
 - **单路召回失败不得降级为 `(nil, nil)`。** 混合召回中任一路 panic 或失败
   要作为该路失败参与裁决；全部路失败时**返回 panic 错误而非静默空结果**。
-- 向量后端可插拔，新增后端不得改 `Embedding`/`Retriever` 接口形状 —— 那会让所有后端同时 breaking。
+- 向量后端可插拔，新增后端不得改 `Embedder`/`KnowledgeService` 接口形状 —— 那会让所有后端同时 breaking。
 
 ## 明确不属于本仓的
 
