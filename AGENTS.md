@@ -7,8 +7,18 @@
 ## 本仓包含
 
 ```
-`knowledge/rag/`
+`/`（module 根，包名 rag → import `github.com/oagentkit/rag`）
 ```
+
+> **包为什么住在 module 根（不要再挪回子目录）**
+>
+> 矩阵的 import 路径规则是 **`github.com/{org}/{仓名}/{包名末段}`**，中间层目录由**仓**承担、
+> 一律丢弃。唯一的例外是**包名末段 == 仓名**：此时包直接落在 module 根，路径不重复末段。
+>
+> 本仓正是这一例——包名 `rag` 恰好等于仓名 `rag`，所以 import 是 `github.com/oagentkit/rag`
+> 而不是 `github.com/oagentkit/rag/rag`。Go 的惯例本就是包名不重复 import 路径末段。
+>
+> 改布局前先跑 `python3 matrix-tools/scripts/rewrite_imports.py --print-rules` 对权威映射表。
 
 ## 硬规则
 
