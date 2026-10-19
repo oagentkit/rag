@@ -2,6 +2,14 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.8.1] — 2026-10-20
+
+### 修复(docs)：Embedding/Retriever 改为真实接口名 Embedder/KnowledgeService (#5)
+
+Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+- 文档(changelog)：补 CHANGELOG.md（从 git 历史生成）
+
 ## [v0.8.0] — 2026-10-19
 
 - 杂务(deps)：依赖地板对齐远端最新（textx v0.5.0） (13)
