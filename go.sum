@@ -224,8 +224,8 @@ github.com/nats-io/nkeys v0.1.0/go.mod h1:xpnFELMwJABBLVhffcfd1MZx6VsNRFpEugbxzi
 github.com/nats-io/nuid v1.0.1/go.mod h1:19wcPz3Ph3q0Jbyiqsd0kePYG7A95tJPxeL+1OSON2c=
 github.com/nikolalohinski/gonja v1.5.3 h1:GsA+EEaZDZPGJ8JtpeGN78jidhOlxeJROpqMT9fTj9c=
 github.com/nikolalohinski/gonja v1.5.3/go.mod h1:RmjwxNiXAEqcq1HeK5SSMmqFJvKOfTfXhkJv6YBtPa4=
-github.com/oagentkit/textx v0.5.0 h1:cEicl++JNXVTm0PoqZxbXhvqrMGa0ojlD6Fl0cESME8=
-github.com/oagentkit/textx v0.5.0/go.mod h1:1QrM4vtTbcRxU7nchnfCiJYqTPumTJRhNeYnjL+KXCY=
+github.com/oagentkit/textx v0.6.1 h1:sv2CZN0mtuZV+BMpK9PpSr+X/kfm4BFMG06QGm0kAL8=
+github.com/oagentkit/textx v0.6.1/go.mod h1:3u7RVcT2ZWbIolyEy3h+Lk7W2xbs75qbKg0s0Qc625A=
 github.com/oekit/concurrency v0.17.1 h1:AEYElvycBC7UTqVp6EPe6avWGE3ljjVT8N3+SDlChQA=
 github.com/oekit/concurrency v0.17.1/go.mod h1:2t5QeK3WHWbJVKwTnPiiBZqHxig3fzEPTefGedFU648=
 github.com/oekit/logx v0.7.1 h1:u+AbbPn0iCnzt11brLXpfj+2CIQhThFEsAwBDXzAfyE=
