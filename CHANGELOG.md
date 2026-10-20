@@ -4,7 +4,7 @@
 
 ## [v0.8.1] — 2026-10-20
 
-### 修复(docs)：Embedding/Retriever 改为真实接口名 Embedder/KnowledgeService (#5)
+### 修复(docs)：Embedding/Retriever 改为真实接口名 Embedder/KnowledgeService
 
 Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -14,7 +14,7 @@ Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## [v0.7.0] — 2026-10-19
 
-- 杂务(deps)：依赖地板对齐远端最新（textx v0.4.0 / concurrency v0.17.1 / logx v0.7.1 / pkg v0.15.1） (#13)
+- 杂务(deps)：依赖地板对齐远端最新（textx v0.4.0 / concurrency v0.17.1 / logx v0.7.1 / pkg v0.15.1）
 
 ## [v0.6.0] — 2026-10-19
 
@@ -55,9 +55,9 @@ oekit/concurrency v0.7.0 起 panic 由 Slot.Err 承载 *async.PanicError
 让 PanicError 的栈能一路 errors.Unwrap 到调用方。
 本地 golangci-lint 0 issues。
 
-- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」 (#3)
-- 杂务(deps)：跟进最新 tag (#2)
-- 杂务(deps)：oekit 依赖升级 (#1)
+- 杂务(deps)：依赖地板升到「历史最新 + 0.1.0」
+- 杂务(deps)：跟进最新 tag
+- 杂务(deps)：oekit 依赖升级
 - 杂务(deps)：oekit/concurrency v0.12.0 -> v0.13.1
 - 杂务(deps)：oekit 三模块升至最新（pkg v0.13.0 / concurrency v0.12.0 / logx v0.7.0）
 - 杂务(deps)：oekit/concurrency v0.6.0 -> v0.9.0
