@@ -2,6 +2,57 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.8.3] — 2026-10-20
+
+### 新增(embedder)：OpenAIEmbedder 补注入缝——client / 超时 / 重试可配
+
+承接 oagentkit/rag#15。`NewOpenAIEmbedder` 原本是四个位置参数的构造函数，
+**没有任何注入缝**：HTTP client、超时、重试策略、出站 transport 全部由包内写死
+（`client: &http.Client{Timeout: 30 * time.Second}`），且 `embedBatch` 走的是
+**不带重试的** `httpjson.DoJSON`。
+缺口有三层：
+1. **无法注入 transport / client**——下游要在 embedding 出站请求上挂自己的
+   出站守卫（SSRF 策略、mTLS、代理、连接池调参），没有入口（client 是未导出字段）。
+2. **超时不可配**——30s 写死；下游既不能调短（快速失败）也不能调长。
+3. **重试能力存在但接不上**——`oekit/pkg/httpjson` 已导出 `DoJSONWithRetry`
+   与 `RetryConfig`（默认判定：网络超时或 HTTP 5xx/429 可重试），但这条路径
+   在 embedding 上拿不到。
+错误面本就是结构化可分类的（`httpjson.StatusError{Code, Body}` + `%w` 包装，
+下游 `errors.As` 能拿到状态码），缺的只是「让下游决定用不用」的那条缝。
+## 改动
+- 新增 `EmbedderOption`（**不裸 `Option`**——多包 co-import 会冲突）+ 三个选项：
+  `WithHTTPClient` / `WithTimeout` / `WithRetry`。
+- `NewOpenAIEmbedder` 改为变参（`opts ...EmbedderOption`），**旧 4 参调用点
+  全部无需改动即可编译**（仓内 7 处调用点已验证）。
+- 有 `WithRetry` 时走 `httpjson.DoJSONWithRetry`，否则保持原来的单次
+  `httpjson.DoJSON`——**默认行为与引入本选项前完全一致**（单次尝试、30s 超时）。
+## 交互规则（写进 godoc，且与选项传入顺序无关）
+- 生效 client：给了 `WithHTTPClient` 就用它（**取副本**，不改调用方持有的对象
+  ——就地改 Timeout 会污染共享 client 的其它使用者），否则用默认的 30s client。
+- `WithTimeout` 覆盖生效 client 自身的 Timeout（**timeout 优先**）。
+- 只给 `WithHTTPClient` 时，完全沿用注入 client 自身的 Timeout（0 = 无超时）。
+- `WithHTTPClient(nil)` / `WithTimeout(d<=0)` 视为未设置；`nil` option 跳过。
+- 零值 `RetryConfig{}` 等价单次尝试（httpjson 把 `MaxAttempts < 1` 视为 1）。
+## 验证
+新增 12 个测试（`embedder_option_test.go`），覆盖：注入的 client 确实被用上
+（自定义 RoundTripper 计数）、timeout 生效、5xx/429 重试后成功、默认路径行为
+与之前完全一致、错误链仍保留 `StatusError.Code` 等。
+```
+$ go build ./... && go vet ./... && gofmt -l .
+$ go test -count=1 ./...        ok  github.com/oagentkit/rag
+$ go test -race -count=1 ./...  ok  github.com/oagentkit/rag
+```
+测试只打 httptest 本地服务器，无真实网络。
+
+- 杂务(deps)：依赖地板抬到最新
+
+地板对齐到发版时刻的各依赖最新 tag：
+- oekit/pkg、oekit/concurrency 抬到 v0.18.0（oekit/logx 已是最新 v0.7.1）
+- 矩阵内跨仓依赖抬到各仓最新 tag
+依据 matrix-tools#44：最新 tag 的依赖地板在「打 tag 那一刻」就已落后一格，
+只能靠后续版本补齐（tag 受 protect-tags ruleset 保护不能重打）。
+
+
 ## [v0.8.2] — 2026-10-20
 
 ### 修复(go)：Go 地板降到 go 1.24.0，CI go-version 同步到 1.24
