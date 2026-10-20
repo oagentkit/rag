@@ -1,13 +1,11 @@
 module github.com/oagentkit/rag
 
-go 1.26.0
-
-toolchain go1.27.2
+go 1.24.0
 
 require (
 	github.com/cloudwego/eino v0.9.21
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
-	github.com/oagentkit/textx v0.5.0
+	github.com/oagentkit/textx v0.6.1
 	github.com/oekit/concurrency v0.17.1
 	github.com/oekit/logx v0.7.1
 	github.com/oekit/pkg v0.15.1
