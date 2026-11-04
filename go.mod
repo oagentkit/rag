@@ -5,10 +5,10 @@ go 1.24.0
 require (
 	github.com/cloudwego/eino v0.9.21
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
-	github.com/oagentkit/textx v0.7.1
-	github.com/oekit/concurrency v0.23.2
-	github.com/oekit/logx v0.8.0
-	github.com/oekit/pkg v0.31.0
+	github.com/oagentkit/textx v0.7.2
+	github.com/oekit/concurrency v0.24.0
+	github.com/oekit/logx v0.8.2
+	github.com/oekit/pkg v0.34.0
 )
 
 require (
