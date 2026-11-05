@@ -335,8 +335,16 @@ func milvusHitChunks(res client.SearchResult) []Chunk {
 }
 
 // AsTool 实现 KnowledgeService 接口。
+//
+// ⚠️ panic 契约（oagentkit/rag#31）：schema 反射构造失败时 panic（接口签名
+// 无 error 通道，构造失败视为编程错误）；需要 error 通道的装配路径用
+// NewSearchTool。
 func (s *MilvusStore) AsTool() tool.BaseTool {
-	return buildAsTool(s)
+	t, err := buildAsTool(s)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
 
 // Close 关闭 Milvus 连接。
