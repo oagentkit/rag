@@ -221,7 +221,11 @@ func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil // 单文件不可读跳过，不阻塞整体索引
+			// 单文件不可读跳过不阻塞整体索引，但**必须告警**（doc 承诺
+			// 「部分失败告警后照常换入」；此前静默跳过 = 该文档从索引消失
+			// 且无信号，排查方向带偏到检索面——rag#33）
+			ragLog.Warn("agentkit.rag.rescan_read_error", "path", path, "error", err.Error())
+			return nil
 		}
 		rel, _ := filepath.Rel(l.dir, path)
 		indexMarkdownFile(rel, string(data), &index, df)

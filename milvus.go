@@ -5,6 +5,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -55,8 +56,13 @@ func (c MilvusConfig) withDefaults(dim int) MilvusConfig {
 	return c
 }
 
-// NewMilvusStore 创建 Milvus 向量检索后端。
+// NewMilvusStore 创建 Milvus 向量检索后端。embedder 为 nil 返回 error
+// （rag#34：此前直接 embedder.Dim() 构造期 nil 解引用 panic，且 doc 未声明——
+// 包内其他构造面均返回 error，本构造器对齐）。
 func NewMilvusStore(ctx context.Context, cfg MilvusConfig, embedder Embedder) (*MilvusStore, error) {
+	if embedder == nil {
+		return nil, errors.New("milvus: embedder 不能为空")
+	}
 	cfg = cfg.withDefaults(embedder.Dim())
 
 	c, err := client.NewClient(ctx, client.Config{Address: cfg.Address})
