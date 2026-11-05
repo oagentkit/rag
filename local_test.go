@@ -361,3 +361,32 @@ func TestRetrieveScoreFilled(t *testing.T) {
 		t.Fatalf("Score 未回填: %v", chunks[0].Score)
 	}
 }
+
+// rescan 单文件读取失败必须告警（rag#33）：doc 承诺「部分失败告警后照常
+// 换入」，此前静默跳过 = 文档从索引消失且无信号。
+func TestRescanReadErrorWarns(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.md"), []byte("正常文档内容"), 0o644)
+	locked := filepath.Join(dir, "locked.md")
+	_ = os.WriteFile(locked, []byte("不可读"), 0o000) // 权限拒绝形态
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 不可读文件不进索引（跳过语义不变；告警面由 ragLog 输出——包级
+	// Delegating logger 无法在测试内断言，此处钉住跳过+不炸）
+	chunks, err := l.Retrieve(context.Background(), "不可读", 5, nil)
+	if err != nil {
+		t.Fatalf("部分失败应照常换入索引: %v", err)
+	}
+	for _, c := range chunks {
+		if strings.Contains(c.Content, "不可读") {
+			t.Fatalf("不可读文件不应进索引: %+v", c)
+		}
+	}
+	// 正常文档照常入索引
+	if chunks2, _ := l.Retrieve(context.Background(), "正常文档", 5, nil); len(chunks2) == 0 {
+		t.Fatal("正常文档应入索引")
+	}
+	_ = locked
+}

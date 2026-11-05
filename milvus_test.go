@@ -105,3 +105,11 @@ func TestEscapeMilvus(t *testing.T) {
 		}
 	}
 }
+
+// 构造期 nil embedder 返回 error（rag#34）：此前直接 embedder.Dim() nil 解引用
+// panic——包内其他构造面均返回 error，本构造器对齐。
+func TestNewMilvusStoreNilEmbedder(t *testing.T) {
+	if _, err := NewMilvusStore(context.Background(), MilvusConfig{Address: "127.0.0.1:19530"}, nil); err == nil {
+		t.Fatal("nil embedder 应返回 error 而非 panic")
+	}
+}
