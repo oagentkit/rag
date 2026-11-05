@@ -159,8 +159,15 @@ func topKChunks(idx []indexedChunk, idf map[string]float64, qt []string, topK in
 }
 
 // AsTool 把检索包成 search_knowledge 工具。
+//
+// ⚠️ panic 契约（oagentkit/rag#31）：schema 反射构造失败时 panic（接口签名
+// 无 error 通道）；需要 error 通道的装配路径用 NewSearchTool。
 func (l *Local) AsTool() tool.BaseTool {
-	return buildAsTool(l)
+	t, err := buildAsTool(l)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
 
 // Rescan 强制重新扫描知识库目录（不等待自动过期）。

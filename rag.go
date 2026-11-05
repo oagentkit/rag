@@ -49,7 +49,9 @@ func (n *Noop) AsTool() tool.BaseTool { return nil }
 var _ KnowledgeService = (*Noop)(nil)
 
 // buildAsTool 构建 search_knowledge eino 工具（Local 和 MilvusStore 共用）。
-func buildAsTool(svc KnowledgeService) tool.BaseTool {
+// 返回 error 通道：InferTool 对入参结构体的反射可以因字段/标签问题失败
+// （下游包装层改了结构体即触发），panic 只留给 AsTool 接口路径——见其 doc。
+func buildAsTool(svc KnowledgeService) (tool.BaseTool, error) {
 	t, err := utils.InferTool("search_knowledge",
 		"检索团队知识库（编码规范/部署约定/历史评审结论/安全清单）。返回最相关的知识片段及出处。",
 		func(ctx context.Context, in *searchIn) (*searchOut, error) {
@@ -73,9 +75,9 @@ func buildAsTool(svc KnowledgeService) tool.BaseTool {
 			return &searchOut{Results: b.String()}, nil
 		})
 	if err != nil {
-		panic(fmt.Sprintf("rag: 构建 search_knowledge 工具失败: %v", err)) // 静态 schema，构造失败即编程错误
+		return nil, fmt.Errorf("rag: 构建 search_knowledge 工具失败: %w", err)
 	}
-	return t
+	return t, nil
 }
 
 type searchIn struct {
@@ -89,4 +91,8 @@ type searchOut struct {
 // NewSearchTool 构建 search_knowledge eino 工具（v0.14.1 导出缝）：消费方包装
 // KnowledgeService 后须重建工具面——包装层 AsTool 直透内层会把工具调用绕过包装
 // 检索语义（bianque 知识组去重包装实需）。schema/文案与 buildAsTool 单源。
-func NewSearchTool(svc KnowledgeService) tool.BaseTool { return buildAsTool(svc) }
+//
+// 返回 error（oagentkit/rag#31）：工具 schema 并非真静态——InferTool 对入参
+// 结构体的反射可因字段/标签问题失败，「静态 schema 即编程错误」是内部注释
+// 不是 API 契约；导出面给 error 通道，装配期失败可被宿主接住。
+func NewSearchTool(svc KnowledgeService) (tool.BaseTool, error) { return buildAsTool(svc) }

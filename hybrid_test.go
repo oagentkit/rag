@@ -143,3 +143,30 @@ func TestHybridLanePanicDegrades(t *testing.T) {
 		t.Fatalf("恐慌路无降级可用时应回 panic 错误而非静默空结果: %v", err)
 	}
 }
+
+// 非法 topK 与后端同口径缺省归一（rag#30）：此前原始值直通 FuseRRF——
+// topK=0 静默吞掉两路全部结果、topK<0 在 keys[:topK] 裸 panic（主 goroutine，
+// 降级机制接不住）。
+func TestHybridRetrieveTopKNormalized(t *testing.T) {
+	newHyb := func(t *testing.T) *Hybrid {
+		return NewHybrid(&fakeKS{chunks: []Chunk{chunk("v1", "alpha"), chunk("v2", "beta")}}, fakeLocal(t))
+	}
+	for _, topK := range []int{0, -1, -100} {
+		h := newHyb(t)
+		chunks, err := h.Retrieve(context.Background(), "q", topK, nil)
+		if err != nil {
+			t.Fatalf("topK=%d: %v", topK, err)
+		}
+		if len(chunks) == 0 {
+			t.Fatalf("topK=%d 应归一为缺省而非吞掉全部结果", topK)
+		}
+	}
+	// FuseRRF 导出面负数不 panic（防御钳零）
+	if out := FuseRRF(-3, []Chunk{{ID: "a", Content: "x"}}); len(out) != 0 {
+		t.Fatalf("FuseRRF(-3) 应空返回: %+v", out)
+	}
+	// 正常截断语义不变
+	if out := FuseRRF(2, []Chunk{{ID: "a", Content: "x"}, {ID: "b", Content: "y"}, {ID: "c", Content: "z"}}); len(out) != 2 {
+		t.Fatalf("FuseRRF(2) 应截 2: %d", len(out))
+	}
+}

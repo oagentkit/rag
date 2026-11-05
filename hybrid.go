@@ -37,6 +37,13 @@ func NewHybrid(vector KnowledgeService, keyword *Local) *Hybrid {
 // 伪装成空路，而是作为该路失败参与降级裁决——单路 panic 降级另一路，双路全败
 // （含 panic）回错不再静默返回空结果；恐慌经全局 handler 上报，不出宿主进程。
 func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Filter) ([]Chunk, error) {
+	// 非法 topK 与两个后端同口径缺省归一（oagentkit/rag#30）：此前原始值直通
+	// FuseRRF——topK=0 静默吞掉两路全部结果（n=0 err=nil，比报错更坏），topK<0
+	// 在 FuseRRF 的 keys[:topK] 裸 panic（且在 FanInErr 收口之外的主 goroutine，
+	// 降级机制接不住）。
+	if topK <= 0 {
+		topK = defaultTopK
+	}
 	lanes := []func() ([]Chunk, error){
 		func() ([]Chunk, error) { return h.vector.Retrieve(ctx, query, topK*2, filter) },
 		func() ([]Chunk, error) { return h.keyword.Retrieve(ctx, query, topK*2, filter) },
@@ -101,6 +108,9 @@ func FuseRRF(topK int, lists ...[]Chunk) []Chunk {
 		}
 		return keys[i] < keys[j]
 	})
+	if topK < 0 {
+		topK = 0 // 导出纯函数不 panic（负数截断在 keys[:topK] 会越界，rag#30）
+	}
 	if len(keys) > topK {
 		keys = keys[:topK]
 	}
