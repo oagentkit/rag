@@ -2,6 +2,192 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.9.0] — 2026-11-06
+
+### 修复(local,milvus)：rescan 读失败告警兑现 doc + NewMilvusStore nil embedder 返回 error（#33 #34）
+
+rag#33——scanMarkdown 单文件 ReadFile 失败补 ragLog.Warn（与目录项错误同
+面）：doc 明写「部分失败告警后照常换入」，此前静默跳过 = 文档从索引静默
+消失且违反自家 doc（权限收紧/磁盘抖动的排查方向被带偏到检索面）。
+rag#34——NewMilvusStore 构造期判 nil embedder 返回 error（对齐包内其他
+构造面）：此前直接 embedder.Dim() nil 解引用 panic 且 doc 未声明。
+TestRescanReadErrorWarns / TestNewMilvusStoreNilEmbedder。全仓 -race 绿。
+关联 oagentkit/rag#33 oagentkit/rag#34
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+### 修复(hybrid,tool)：topK 缺省归一 + NewSearchTool error 通道（#30 #31）
+
+rag#30——Hybrid.Retrieve 入口与两个后端同口径 topK<=0 → defaultTopK：此前
+原始值直通 FuseRRF，topK=0 静默吞掉两路全部结果（n=0 err=nil 比报错更坏）、
+topK<0 在 keys[:topK] 裸 panic（FanInErr 收口之外的主 goroutine，降级机制
+接不住）。FuseRRF 导出面负数钳零（导出纯函数不 panic）。
+rag#31——「静态 schema 即编程错误」是内部注释非 API 契约：
+- NewSearchTool 改返回 (tool.BaseTool, error)——InferTool 对入参结构体的
+  反射可因字段/标签问题失败（下游包装层改了结构体即触发），导出面给
+  error 通道，装配期失败可被宿主接住
+- AsTool 接口路径（Local/MilvusStore）panic 契约显式写进 doc（接口签名
+  无 error 通道）——文档与行为对齐，不再是隐式内部注释
+TestHybridRetrieveTopKNormalized：topK 0/-1/-100 三点归一 + FuseRRF 负数
+钳零 + 正常截断语义不变。
+关联 oagentkit/rag#30 oagentkit/rag#31
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.25.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.24.0` | `v0.25.1` |
+| `github.com/oekit/logx` | `v0.8.2` | `v0.8.3` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.8.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.2` | `v0.8.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.34.1
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/pkg` | `v0.34.0` | `v0.34.1` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.7.2
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.7.1` | `v0.7.2` |
+| `github.com/oekit/concurrency` | `v0.23.2` | `v0.24.0` |
+| `github.com/oekit/logx` | `v0.8.0` | `v0.8.2` |
+| `github.com/oekit/pkg` | `v0.31.0` | `v0.34.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+Co-authored-by: Murphy-Yi <zhangyi@Murphy-YideMac-Mini.local>
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.2
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.23.1` | `v0.23.2` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.1
+
+oekit 基座又发了一版（`concurrency` v0.23.1，2026-10-29 02:19 CST）⇒ 上一轮抬到
+v0.23.0 的地板已经落后 ⇒ 再抬一格。
+本仓只用到 `concurrency` 的少量 API ⇒ 实测 go build / go vet / go test -race 全绿，
+**零行为差异**；go 指令未被顶起。
+只改 go.mod / go.sum ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.23.0 github.com/oekit/logx v0.8.0 github.com/oekit/pkg v0.31.0
+
+oekit 基座发了新版本（pkg v0.31.0 / concurrency v0.23.0 / logx v0.8.0）⇒ 本仓的
+依赖地板落后 ⇒ 抬到最新，让**下一次发版**不再带出落后地板（打 tag 时刻的地板
+必须是当时的最新——`verify_tag_floor` / `release.py doctor` 都在查这条）。
+兼容性实测：本仓只用这些基座包的少量 API ⇒ go build / go vet / go test -race
+全绿，**零行为差异**；go 指令未被顶起（本仓的 go 地板不动）。
+
+- 杂务(deps)：依赖地板追平上游本轮新版本——textx v0.7.1
+
+本仓 HEAD 的依赖地板已落后于 textx 的最新版本（`verify_tag_floor.py --org oagentkit --ref HEAD` 判红）。
+本仓一旦发版，就会把落后地板发出去——而 tag 受 protect-tags ruleset 保护、打完不能重打，
+只能靠后续版本补齐。
+本版只抬依赖地板，不改任何行为：
+- github.com/oagentkit/textx v0.6.2 → v0.7.1
+对应 issue matrix-tools#143。
+
+- 杂务(deps)：依赖地板追平上游本轮新版本——github.com/oekit/concurrency@v0.22.0、github.com/oekit/pkg@v0.28.0
+
+本仓 HEAD 的依赖地板已落后于各依赖的最新版本（`verify_tag_floor.py --org oagentkit --ref HEAD` 判红）。
+本仓一旦发版，就会把落后地板发出去——而 tag 受 protect-tags ruleset 保护、打完不能重打，
+只能靠后续版本补齐。
+本版只抬依赖地板，不改任何行为：
+- github.com/oekit/concurrency → v0.22.0
+- github.com/oekit/pkg → v0.28.0
+对应 issue matrix-tools#143。
+
+
+- 文档(rag)：刷正 README.md 的层位声明——tier 1 → tier 2
+
+## 现状
+本仓 `README.md` 的两处层位声明写的是**层位重定位之前**的旧层位（tier 1），
+而矩阵单一数据源 `matrix-tools/modules.json` 说本仓是 **tier 2（集成层）**。
+层位重定位的依据见 matrix-tools 提交 `6d800c4`「层位 = 依赖地板」——
+tier 2 的定义是「依赖 tier0/tier1 + 重第三方地板」（`modules.json` 的 `tiers` 映射）。
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `README.md` 第 3 行（定位声明行） | `**tier 1**` | `**tier 2**` |
+| `README.md` 第 15 行（`## 定位` 自述行） | `**tier 1**` | `**tier 2**` |
+- `modules.json`：`rag` 的 `tier` = **2**，`tiers["2"]` = 集成层
+- 本仓 `AGENTS.md` 第 5 行：**已是** `> 矩阵分层：**tier 2**（集成层，依赖 tier0/tier1 + 重第三方地板）`
+  ⇒ 改之前，本仓的**两个第一入口互相矛盾**（`AGENTS.md` 说 tier 2、`README.md` 说 tier 1）
+## 影响
+`README.md` 是仓级的第一入口（人读 + agent 读）。它写 tier 1 而数据源是 tier 2 ⇒
+读者按 README 判断依赖方向就会算错，而分层是矩阵的**硬不变量**（tier N 不得依赖 tier > N）。
+## 改动
+**只改层位数字与层名，其余段落逐字不动**：
+- 第 3 行：`**tier 1**` → `**tier 2**`，层名 `（能力层，依赖 tier0）` → `（集成层，依赖 tier0/tier1 + 重第三方地板）`
+- `## 定位`：`**tier 1**` → `**tier 2**`，层名 `能力层` → `集成层`
+层名与整段括号说明对齐到 tier 2 的权威表述后，与本仓 `AGENTS.md`
+及 `llm` / `toolgate` / `tools` / `agent` 四个 tier 2 仓的 README 逐字一致。
+diff 只含层位行，`README.md` 的手写段落逐字未动。
+## 验收
+- [x] `python3 matrix-tools/scripts/verify_repo_tiers.py --root .` ⇒ 本仓 README **红 0**（本地实跑，26 处声明全一致）
+- [x] 层位数字与层名与 `modules.json` 一致，且与本仓 `AGENTS.md` 一致
+- [x] **纯 .md 改动** ⇒ 不需要 CHANGELOG 条目、不打 tag、不发版（无发版步骤）
+关联 oagentkit/matrix-tools#123
+
+- 文档(rag)：刷正 AGENTS.md 层位声明——tier 1 → tier 2
+
+AGENTS.md 的层位声明与矩阵单一数据源 modules.json 不一致。
+- 矩阵分层：**tier 1**（能力层，依赖 tier0）→ **tier 2**（集成层，依赖 tier0/tier1 + 重第三方地板）
+- 「本仓是 tier 1，只允许依赖 tier ≤ 1 的仓」→ tier 2
+modules.json 里 rag 的 tier = 2（层名「集成层」；层位 t1 → t2 时带 eino + milvus-sdk
+地板，向量化/混合召回本身绑 SDK）。层位写错会让人按 tier 1 的口径判依赖方向，
+而分层是矩阵的硬不变量。
+属 matrix-tools#109 的仓级层位漂移；同批修 queue / obs / skillkit / mcpkit。
+diff 只含层位行，AGENTS.md 的手写段落逐字未动。
+
+
 ## [v0.8.5] — 2026-10-21
 
 - 杂务(deps)：依赖地板跟到矩阵本轮新版本——textx v0.6.2
