@@ -2,6 +2,58 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.10.0] — 2026-11-07
+
+### 修复(rag)：FuseRRF 稳定键/幻影块/embedding 批上限/Milvus VarChar 全字段守卫（#40-#43）
+
+## 概览
+一批修复 4 个 issue：FuseRRF 融合键塌缩（#40）、carryOverlap 幻影块（#41）、embedding 批大小超端点上限（#42）、Milvus VarChar 守卫缺失（#43）。本地 `gofmt`/`go vet`/`go build`/`go test -race -count=2` 全绿，覆盖率 70.5%（门禁 30%）。
+close #40
+close #41
+close #42
+close #43
+---
+## #40 FuseRRF 以 Content 当 key——同内容跨文件塌缩 + 同路自增强
+**根因**：Local 后端 chunk 只填 Content/Metadata、从不设 ID，`FuseRRF` 对空 ID 回退用内容做融合 key。两份内容相同但来源不同的 chunk（许可证头、告警模板、同名配置样例）在 key 上塌缩，`best` 只保留一个代表副本——另一文件的 chunk 从结果消失且无信号；同路两个副本还各占一个 rank 给同一 key 双重计分（自增强挤占 topK）。
+**修法**：
+- chunk 标识单源 `chunkID(file, seq)` = `file#chunk_N`（rag.go）：Local 索引给每个 chunk 赋确定性 ID；Milvus 检索路径把 id 列加入 search output 并回传到 `Chunk.ID`——双路统一格式，跨路共识按 ID 归并。
+- `FuseRRF` 融合 key 三级回退：ID → `Metadata["file"]`+内容 → 纯内容；去重语义明确为**同源去重**（同一 chunk 的跨路副本归并），不是同内容跨文件去重。
+- 同一 list 内同 key 只计首个名次，同路重复不再给自己加权。
+**测试**：`TestLocalChunkStableID`（两文件同内容不塌缩、ID 格式/互异）、`TestFuseRRFKeySemantics`（跨文件保留/同源去重/同路不自增强/无元数据回退）、`TestMilvusHitChunksCarriesID`（接口桩构造 SearchResult，无需外部 Milvus）。
+## #41 carryOverlap 把 100-rune 纯重叠尾巴旋成独立「幻影块」
+**根因**：正文行使 `curLen ≥ chunkTargetRunes` 且还有后续行时 `carryOverlap` flush 母块、cur 只剩 100-rune 携带尾；下一行若是标题，`carryOverlap` 对纯尾巴取 `overlapTail` 返回 `""`（`len(runes) <= overlapRunes`），随后 `flush` 把尾巴独立成块——内容=母块末尾逐字副本、顶着上一节标题，Local 与 Milvus 双路索引同时被污染（每边界多付一次 embedding，检索面母块+幻影块双占 topK）。同根因副产物：代码块内 `maxChunkRunes` 强制 flush 后闭合围栏落在空 cur，旋出 content 仅为 ```` ``` ```` 的垃圾块。
+**修法**：`mdChunker` 新增 `curIsCarry` 状态（cur 仅含携带尾且此后未追加新内容，`appendLine` 清除）；标题边界、超长行边界遇纯携带尾直接丢弃——母块已逐字持有该文本，纯重叠独立块严格劣于丢弃；闭合围栏落在空 cur 不再收留。
+**测试**：`TestChunkMarkdownNoPhantomCarryTail`（issue 原复现：甲节 1200-rune 单行+乙节标题，2 块无幻影；含「任何块不得是另一块末尾 overlap 窗口逐字副本」通用断言 + 边界后跟正文行的对照组证明重叠机制本身保留）、`TestChunkMarkdownNoLoneFenceGarbageChunk`（孤立围栏垃圾块回归）。
+## #42 embedder batchSize=16 超过 DashScope text-embedding-v3 单批上限 10
+**根因**：`embedder.go` 默认 `batchSize = 16`，而该实现的类型注释明确点名支持百炼 compatible-mode——DashScope text-embedding-v3/v4 单批上限 10 条（端点不代调用方拆分，超限直接 4xx）。输入 >10 条时第二批起全部报错，「配百炼 v3」开箱即挂，排查方向会被带去 API key/网络。
+**修法**：默认批大小降为 10（`defaultEmbedBatchSize`，对齐支持的端点中最受限者，更小批次对所有端点合法）；新增 `WithBatchSize(n)` 选项，接入上限更高的提供商（OpenAI 2048 / DashScope v1-v2 25）可调大减少请求轮次，`n<=0` 视为未设置；文档写明各提供商上限矩阵。
+**测试**：`TestOpenAIEmbedderBatching` 更新（20 条 → 10+10，且断言任何单请求 ≤ 端点上限）、`TestOpenAIEmbedderBatchSizeOption`（WithBatchSize(16) → 16+4；非法值回落默认）。
+## #43 milvus VarChar 上限守卫只护 content——heading/file/主键 id 按字节超限致整文件 Upsert 失败
+**根因**：schema 中 id=VarChar(528)、file=VarChar(512)、heading=VarChar(512)（Milvus 按字节计长），写入侧守卫只有 chunker 的 `maxChunkRunes`（只护 content）。CJK 标题 ≥171 字（513 字节）即让该节全部 chunk 的 Upsert 失败；深路径+CJK 路径 file 可超 512 字节，且 `id = file+"#chunk_N"` 同步破 528——错误埋在 Milvus 服务端报错深处，文件从语义路消失。
+**修法**：字段上限单源化（`milvusIDMaxLen`/`milvusContentMaxLen`/`milvusFileMaxLen`/`milvusHeadingMaxLen`，schema 定义与写入守卫共用）；`indexRows` 对全部标量字段做字节守卫，按字段语义区分处理：
+- **heading**：按 rune 边界截断（`truncateUTF8` 不劈多字节字符）——标题仅是展示/过滤元数据，内容全文保留在 content 字段；
+- **file**：超限截断到上限内并附加全路径 sha256 短散列后缀——朴素截断会让共享长前缀的两个深路径文件 file 与主键同时碰撞、Upsert 互相覆盖（静默丢数据，比超限报错更坏）；
+- **主键 id**：超限 fail-fast 报错并注明字段与上限——主键不可截断，截断=跨文件碰撞。
+**测试**：`TestIndexRowsVarCharGuards`（600 字节 CJK 标题截断保前缀且 UTF-8 合法、深路径 file/id 有界且共享前缀不碰撞、短路径原样透传）、`TestMilvusRowIDGuard`（主键压线/越界边界：9 位序号恰好 528、10 位报错）——均为纯函数单测，不依赖外部 Milvus 实例。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oagentkit/textx` | `v0.9.0` | `v0.10.0` |
+| `github.com/oekit/concurrency` | `v0.25.1` | `v0.27.0` |
+| `github.com/oekit/logx` | `v0.8.3` | `v0.8.4` |
+| `github.com/oekit/pkg` | `v0.34.1` | `v0.36.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.9.0] — 2026-11-06
 
 ### 修复(local,milvus)：rescan 读失败告警兑现 doc + NewMilvusStore nil embedder 返回 error（#33 #34）
