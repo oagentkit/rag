@@ -226,8 +226,8 @@ github.com/nikolalohinski/gonja v1.5.3 h1:GsA+EEaZDZPGJ8JtpeGN78jidhOlxeJROpqMT9
 github.com/nikolalohinski/gonja v1.5.3/go.mod h1:RmjwxNiXAEqcq1HeK5SSMmqFJvKOfTfXhkJv6YBtPa4=
 github.com/oagentkit/textx v0.10.0 h1:LyjlB4iHuHm6Zd+nPPyhLOsIpXum62YgeJsAs5McRik=
 github.com/oagentkit/textx v0.10.0/go.mod h1:9tWFd+oYue5pbdqdvxZhNFplbTfS37n+5xwO5jluEIw=
-github.com/oekit/concurrency v0.27.0 h1:UPx830GDhEZfMZbltuK+uP78v6bZ5FGTg8Gr99xnfEE=
-github.com/oekit/concurrency v0.27.0/go.mod h1:iUFvO18Z7YztWu8BTrgserAqtRumT+KexgP9NUWhGDg=
+github.com/oekit/concurrency v0.28.0 h1:niGFAbA5s0vuUShofur479ZbzMSw4BtVDEBFb4Bv/3U=
+github.com/oekit/concurrency v0.28.0/go.mod h1:dJ8h++l2iUtRZDxvCIKWv+jth7fO9VlD1IoM+WTW9BY=
 github.com/oekit/logx v0.8.5 h1:SC8WxVTmLLPG7OdGJl90FHSyn8UwmaBJoNOQqvYgNvs=
 github.com/oekit/logx v0.8.5/go.mod h1:wUsASSs8nfRzr/l7rpf+96q1VyPY74S3EdkBKCVxajo=
 github.com/oekit/pkg v0.37.0 h1:aEaVTkYhc5od3vqQisn2LIwfn5HBow8lQPHF2bjGu2I=
