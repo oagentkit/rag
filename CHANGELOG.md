@@ -36,6 +36,21 @@ close #43
 - **主键 id**：超限 fail-fast 报错并注明字段与上限——主键不可截断，截断=跨文件碰撞。
 **测试**：`TestIndexRowsVarCharGuards`（600 字节 CJK 标题截断保前缀且 UTF-8 合法、深路径 file/id 有界且共享前缀不碰撞、短路径原样透传）、`TestMilvusRowIDGuard`（主键压线/越界边界：9 位序号恰好 528、10 位报错）——均为纯函数单测，不依赖外部 Milvus 实例。
 
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.5
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/logx` | `v0.8.4` | `v0.8.5` |
+| `github.com/oekit/pkg` | `v0.36.0` | `v0.37.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
 - 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.0
 
 | 依赖 | 现地板 | 抬到 |
