@@ -22,7 +22,7 @@ import (
 // ragLog 包级组件 logger（ekit v0.31 Delegating 纪律：包归属用 component 属性
 // 标识、懒解析到 logx.Default()——消费方可 SetDefault 统一接管级别/后端；
 // 此前每次告警现场 NewSlogLogger 构造独立后端）。
-var ragLog = logx.Delegating("agentkit-rag")
+var ragLog = logx.Delegating("oagentkit-rag")
 
 const (
 	defaultTopK      = 5
