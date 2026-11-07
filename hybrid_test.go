@@ -73,6 +73,46 @@ func TestFuseRRFDedupeAndDeterminism(t *testing.T) {
 	}
 }
 
+// TestFuseRRFKeySemantics 融合 key 语义（rag#40）：去重=同源去重——同 ID（或
+// 同 file+内容）归并，同内容跨文件不塌缩；同路同 key 重复不给自己加权。
+func TestFuseRRFKeySemantics(t *testing.T) {
+	meta := func(file string) map[string]string { return map[string]string{"file": file} }
+	sameContent := "Apache License 同内容副本"
+
+	// 无 ID、不同 file 的同内容 chunk：各自保留（不跨文件塌缩——许可证头/
+	// 告警模板等相同内容不同来源的 chunk 互异）
+	got := FuseRRF(5, []Chunk{
+		{Content: sameContent, Metadata: meta("a.md")},
+		{Content: sameContent, Metadata: meta("b.md")},
+	})
+	if len(got) != 2 {
+		t.Fatalf("同内容跨文件不应塌缩: %+v", got)
+	}
+
+	// 无 ID、同 file 的同内容 chunk：同源去重为一份
+	got = FuseRRF(5, []Chunk{
+		{Content: sameContent, Metadata: meta("a.md")},
+		{Content: sameContent, Metadata: meta("a.md")},
+	})
+	if len(got) != 1 {
+		t.Fatalf("同源同内容应去重: %+v", got)
+	}
+
+	// 同路同 ID 重复：只计首个名次，不得自增强（score=1/(k+1) 而非两次累加）
+	got = FuseRRF(5, []Chunk{chunk("x", "1"), chunk("x", "2")})
+	if len(got) != 1 {
+		t.Fatalf("同 ID 应归并: %+v", got)
+	}
+	if want := 1 / float64(rrfK+1); got[0].Score != want {
+		t.Fatalf("同路重复不应双重计分: score=%v want %v", got[0].Score, want)
+	}
+
+	// 无 ID 无 file：退化为内容去重（纯内容 chunk 的最简形态仍可融合）
+	if got = FuseRRF(5, []Chunk{{Content: "raw"}, {Content: "raw"}}); len(got) != 1 {
+		t.Fatalf("无元数据同内容应去重: %+v", got)
+	}
+}
+
 // fakeLocal/two helper：真 Local 索引临时目录（词料路走真实 TF-IDF）。
 func fakeLocal(t *testing.T) *Local {
 	t.Helper()
