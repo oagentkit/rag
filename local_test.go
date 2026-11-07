@@ -319,6 +319,116 @@ func TestChunkMarkdownOverlongLineInCodeBlock(t *testing.T) {
 	}
 }
 
+// TestChunkMarkdownNoPhantomCarryTail 回归（rag#41）：长度切块边界紧跟标题时，
+// carryOverlap 留下的 100-rune 纯重叠尾不得独立成块——该尾巴是母块末尾的逐字
+// 副本（此前实测：1300-rune 母块后跟一个 100-rune「幻影块」顶着上一节标题，
+// Local 与 Milvus 双路索引同时被逐字重复块污染）。
+func TestChunkMarkdownNoPhantomCarryTail(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## 甲节标题\n\n")
+	b.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 100)) // 1200 rune 单行，跨 600 阈值且下一行是标题
+	b.WriteString("\n## 乙节标题\n\n乙节正文。\n")
+	chunks := chunkMarkdown(b.String())
+	if len(chunks) != 2 {
+		t.Fatalf("应 2 块（甲节母块+乙节），得到 %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].heading != "甲节标题" || chunks[1].heading != "乙节标题" {
+		t.Fatalf("标题归属错: %+v", chunks)
+	}
+	// 通用断言：任何块不得是另一块末尾 overlap 窗口的逐字副本（幻影块形态）
+	for i, c := range chunks {
+		for j, o := range chunks {
+			if i == j {
+				continue
+			}
+			other := []rune(o.content)
+			if len(other) > overlapRunes && string(other[len(other)-overlapRunes:]) == c.content {
+				t.Fatalf("块 %d 是块 %d 末尾 %d rune 的逐字副本（幻影块）", i, j, overlapRunes)
+			}
+		}
+	}
+
+	// 对照组：边界后跟正文行（非标题）——携带尾正常作为下一块前缀保留。
+	// 修掉的是「纯尾巴独立成块」，不是重叠机制本身。
+	var c2 strings.Builder
+	c2.WriteString("## 甲节标题\n\n")
+	c2.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 100))
+	c2.WriteString("\n后续正文行承接携带尾。\n")
+	chunks2 := chunkMarkdown(c2.String())
+	if len(chunks2) != 2 {
+		t.Fatalf("对照组应 2 块，得到 %d: %+v", len(chunks2), chunks2)
+	}
+	mother := []rune(chunks2[0].content)
+	if !strings.HasPrefix(chunks2[1].content, string(mother[len(mother)-overlapRunes:])) {
+		t.Fatalf("对照组下一块应以携带尾开头: %q", chunks2[1].content)
+	}
+}
+
+// TestChunkMarkdownNoLoneFenceGarbageChunk 回归（rag#41 同根因副产物）：代码块
+// 内 maxChunkRunes 强制 flush 后紧跟围栏闭合行，不得产出 content 仅为 "```"
+// 的垃圾块（闭合围栏落在空 cur 时丢弃——围栏行无检索价值）。
+func TestChunkMarkdownNoLoneFenceGarbageChunk(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("```go\n")
+	// "```go" 占 5 rune；正文行每行 5 rune，恰好填满强制 flush 阈值让 cur 清空
+	for i := 0; i < maxChunkRunes/5-1; i++ {
+		b.WriteString("x = 1\n")
+	}
+	b.WriteString("```\n\n## 下一节\n\n正文。\n")
+	chunks := chunkMarkdown(b.String())
+	for i, c := range chunks {
+		if strings.TrimSpace(c.content) == "```" {
+			t.Fatalf("块 %d 是孤立围栏垃圾块: %+v", i, c)
+		}
+	}
+	// 围栏后的标题与正文照常成块
+	found := false
+	for _, c := range chunks {
+		if c.heading == "下一节" && strings.Contains(c.content, "正文。") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("下一节内容缺失: %+v", chunks)
+	}
+}
+
+// TestLocalChunkStableID 回归（rag#40）：Local 索引的 chunk 带确定性 ID
+// （file#chunk_N，与 Milvus 主键同格式）——此前 ID 恒空，FuseRRF 退化为按内容
+// 做 key：同内容跨文件塌缩成一份、同路重复自增强挤占 topK。
+func TestLocalChunkStableID(t *testing.T) {
+	dir := t.TempDir()
+	body := "相同的许可证头内容，用于构造跨文件同内容 chunk。\n"
+	_ = os.WriteFile(filepath.Join(dir, "a.md"), []byte("# A\n\n"+body), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "b.md"), []byte("# B\n\n"+body), 0o644)
+
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := l.Retrieve(context.Background(), "许可证头", 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("两文件的 chunk 都应入榜（同内容不塌缩），得到 %d: %+v", len(chunks), chunks)
+	}
+	ids := map[string]bool{}
+	for _, c := range chunks {
+		if want := chunkID(c.Metadata["file"], 0); c.ID != want {
+			t.Fatalf("ID=%q want %q（file=%q）", c.ID, want, c.Metadata["file"])
+		}
+		ids[c.ID] = true
+	}
+	if len(ids) != 2 {
+		t.Fatalf("两文件 ID 应互异: %+v", chunks)
+	}
+	// FuseRRF 按 ID 融合：同内容不同 ID 不塌缩（去重语义=同源去重）
+	if got := FuseRRF(5, chunks); len(got) != 2 {
+		t.Fatalf("FuseRRF 不应跨文件塌缩同内容 chunk: %+v", got)
+	}
+}
+
 func TestChunkPreview(t *testing.T) {
 	content := "# 手册\n\nintro 段落。\n\n## 内存排查\n\n" + strings.Repeat("OOM 排查步骤。", 80) + "\n\n## 收尾\n\ndone。"
 	chunks := ChunkPreview(content)

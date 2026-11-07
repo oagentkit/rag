@@ -23,6 +23,14 @@ type Chunk struct {
 	Metadata map[string]string
 }
 
+// chunkID chunk 确定性标识（file#chunk_N）：Local 与 Milvus 双路统一格式——
+// Hybrid 的 RRF 融合按 ID 跨路归并双路共识。此前 Local 路 chunk ID 恒空，
+// FuseRRF 退化为按内容做 key：同内容跨文件塌缩成一份、同路重复自增强挤占
+// topK（oagentkit/rag#40）。
+func chunkID(file string, seq int) string {
+	return fmt.Sprintf("%s#chunk_%d", file, seq)
+}
+
 // Filter 检索过滤条件（如 repo、规范文档名）。
 type Filter map[string]string
 

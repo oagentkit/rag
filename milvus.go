@@ -5,9 +5,12 @@ package rag
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
@@ -21,6 +24,15 @@ const (
 	milvusFileField         = "file"
 	milvusHeadingField      = "heading"
 	milvusVectorField       = "embedding"
+
+	// VarChar 字段字节上限（Milvus 按字节计长）——schema 定义与写入守卫共用
+	// 单源。此前守卫只覆盖 content（chunker maxChunkRunes），heading/file/
+	// 主键 id 按字节超限时错误埋在 Milvus 服务端报错深处、整文件 Upsert 失败
+	// （rag#43）。
+	milvusIDMaxLen      = 528 // 主键 = file + "#chunk_N"：file 上限 + 序号后缀余量
+	milvusContentMaxLen = 65535
+	milvusFileMaxLen    = 512
+	milvusHeadingMaxLen = 512
 )
 
 // MilvusConfig Milvus 连接配置。
@@ -96,10 +108,10 @@ func (s *MilvusStore) ensureCollection(ctx context.Context) error {
 		WithDescription("agentkit knowledge base").
 		// 主键 = file + "#chunk_N"：上限须 ≥ file 上限 + 后缀余量（此前 128
 		// 与 file 字段 512 不一致，深路径文件的 Upsert 必因主键超长失败）
-		WithField(entity.NewField().WithName(milvusIDField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(528).WithIsPrimaryKey(true)).
-		WithField(entity.NewField().WithName(milvusContentField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(65535)).
-		WithField(entity.NewField().WithName(milvusFileField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
-		WithField(entity.NewField().WithName(milvusHeadingField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
+		WithField(entity.NewField().WithName(milvusIDField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusIDMaxLen).WithIsPrimaryKey(true)).
+		WithField(entity.NewField().WithName(milvusContentField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusContentMaxLen)).
+		WithField(entity.NewField().WithName(milvusFileField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusFileMaxLen)).
+		WithField(entity.NewField().WithName(milvusHeadingField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusHeadingMaxLen)).
 		WithField(entity.NewField().WithName(milvusVectorField).WithDataType(entity.FieldTypeFloatVector).WithDim(int64(s.cfg.Dimension)))
 
 	if err := s.client.CreateCollection(ctx, schema, entity.DefaultShardNumber); err != nil {
@@ -154,7 +166,10 @@ func (s *MilvusStore) IndexQuiet(ctx context.Context, file string, content strin
 		}
 		return nil
 	}
-	rows := indexRows(file, chunks)
+	rows, err := indexRows(file, chunks)
+	if err != nil {
+		return fmt.Errorf("milvus: 索引行准备失败: %w", err)
+	}
 	texts := make([]string, len(rows))
 	for i, r := range rows {
 		texts[i] = r.content
@@ -188,18 +203,63 @@ type milvusRow struct {
 	file    string
 }
 
-// indexRows 索引行准备。
-func indexRows(file string, chunks []mdChunk) []milvusRow {
+// fileStoredHashLen 超限 file 截断后附加的散列后缀长度（"#" + 8 hex）。
+const fileStoredHashLen = 9
+
+// truncateUTF8 按字节上限截断，不劈开多字节 rune（截断结果仍是合法 UTF-8——
+// 劈半的 rune 落库即乱码）。s 不超限时原样返回（零拷贝）。
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// 截点合法 ⇔ 截点后的首字节是 rune 起始字节；否则该 rune 跨界被劈开，回退。
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
+// milvusFileStored file 字段的落库形态：不超限原样透传；超限截到上限内并附加
+// 全路径散列后缀。朴素截断会让共享长前缀的两个深路径文件 file 字段与主键同时
+// 碰撞（Upsert 互相覆盖 = 静默丢数据，比超限报错更坏），散列后缀保持唯一（rag#43）。
+func milvusFileStored(file string) string {
+	if len(file) <= milvusFileMaxLen {
+		return file
+	}
+	sum := sha256.Sum256([]byte(file))
+	return truncateUTF8(file, milvusFileMaxLen-fileStoredHashLen) + "#" + hex.EncodeToString(sum[:4])
+}
+
+// milvusRowID 主键构造 + 字节守卫：主键不可截断——截断=跨文件碰撞覆盖，超限
+// fail-fast 报错并注明字段与上限，而非把失败埋进 Milvus 服务端报错深处（rag#43）。
+func milvusRowID(fileStored string, seq int) (string, error) {
+	id := chunkID(fileStored, seq)
+	if len(id) > milvusIDMaxLen {
+		return "", fmt.Errorf("milvus: 主键 id %d 字节超过 VarChar 上限 %d（file=%q, chunk=%d），主键不可截断", len(id), milvusIDMaxLen, fileStored, seq)
+	}
+	return id, nil
+}
+
+// indexRows 索引行准备——所有 VarChar 标量字段按字节守卫（rag#43）：content 由
+// chunker 的 maxChunkRunes 保证（≤4000 rune ≤16000 字节）；heading 超限按 rune
+// 边界截断（标题仅是展示/过滤元数据，内容全文保留在 content 字段）；file 超限
+// 截断+散列后缀保唯一；id 超限报错。
+func indexRows(file string, chunks []mdChunk) ([]milvusRow, error) {
+	file = milvusFileStored(file)
 	rows := make([]milvusRow, len(chunks))
 	for i, c := range chunks {
+		id, err := milvusRowID(file, i)
+		if err != nil {
+			return nil, err
+		}
 		rows[i] = milvusRow{
-			id:      fmt.Sprintf("%s#chunk_%d", file, i),
+			id:      id,
 			content: c.content,
-			heading: c.heading,
+			heading: truncateUTF8(c.heading, milvusHeadingMaxLen),
 			file:    file,
 		}
 	}
-	return rows
+	return rows, nil
 }
 
 // upsertChunks 列构建 + Upsert（写入收尾阶段，与 Embed/Delete 解耦；Flush 由
@@ -290,7 +350,7 @@ func (s *MilvusStore) searchChunks(ctx context.Context, expr string, vec []float
 		return nil, fmt.Errorf("milvus: 搜索参数构造失败（nprobe=%d）: %w", s.cfg.NProbe, err)
 	}
 	results, err := s.client.Search(ctx, s.cfg.Collection, nil, expr,
-		[]string{milvusContentField, milvusFileField, milvusHeadingField},
+		[]string{milvusIDField, milvusContentField, milvusFileField, milvusHeadingField},
 		[]entity.Vector{entity.FloatVector(vec)}, milvusVectorField, s.cfg.MetricType, topK, sp)
 	if err != nil {
 		return nil, fmt.Errorf("milvus: 搜索失败: %w", err)
@@ -299,15 +359,21 @@ func (s *MilvusStore) searchChunks(ctx context.Context, expr string, vec []float
 }
 
 // milvusHitChunks 检索命中行 → Chunk（列缺失取空串，score 越界取 0）。
+// 回传主键到 Chunk.ID：Hybrid 的 RRF 融合按 ID 跨路归并共识——此前命中 chunk
+// ID 恒空，只能靠内容回退 key，与 Local 路（file#chunk_N）对不上号，跨路共识
+// 加权失效（rag#40）。
 func milvusHitChunks(res client.SearchResult) []Chunk {
 	chunks := make([]Chunk, 0, res.ResultCount)
 
+	var idCol *entity.ColumnVarChar
 	var contentCol *entity.ColumnVarChar
 	var fileCol *entity.ColumnVarChar
 	var headingCol *entity.ColumnVarChar
 
 	for _, field := range res.Fields {
 		switch field.Name() {
+		case milvusIDField:
+			idCol, _ = field.(*entity.ColumnVarChar)
 		case milvusContentField:
 			contentCol, _ = field.(*entity.ColumnVarChar)
 		case milvusFileField:
@@ -329,6 +395,7 @@ func milvusHitChunks(res client.SearchResult) []Chunk {
 		}
 
 		chunks = append(chunks, Chunk{
+			ID:      columnValueAt(idCol, i),
 			Content: content,
 			Score:   score,
 			Metadata: map[string]string{

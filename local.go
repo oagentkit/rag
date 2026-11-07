@@ -236,7 +236,7 @@ func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr
 
 // indexMarkdownFile 单文件分块入索引并累计文档频率。
 func indexMarkdownFile(rel, data string, index *[]indexedChunk, df map[string]int) {
-	for _, c := range chunkMarkdown(data) {
+	for i, c := range chunkMarkdown(data) {
 		toks := tokenize(c.content)
 		freq := make(map[string]int, len(toks))
 		for _, t := range toks {
@@ -247,6 +247,10 @@ func indexMarkdownFile(rel, data string, index *[]indexedChunk, df map[string]in
 		}
 		*index = append(*index, indexedChunk{
 			chunk: Chunk{
+				// 确定性 ID（rel#chunk_N，与 Milvus 主键同格式）：FuseRRF 按
+				// ID 跨路归并共识；此前 ID 恒空，融合退化为按内容做 key——
+				// 同内容跨文件塌缩 + 同路自增强（rag#40）
+				ID:       chunkID(rel, i),
 				Content:  c.content,
 				Metadata: map[string]string{"file": rel, "heading": c.heading},
 			},
@@ -289,29 +293,44 @@ type mdChunker struct {
 	cur         []string
 	curLen      int
 	inCodeBlock bool
+	// curIsCarry cur 仅含上次切块携带的重叠尾（此后未追加任何新内容）。
+	// 此状态下再遇块边界（标题/超长行/闭合围栏）不得把尾巴独立成块——
+	// 母块已逐字持有该文本，独立块是纯重复的「幻影块」（rag#41）。
+	curIsCarry bool
 }
 
 // flush 当前累积行成块（无实质内容则丢弃）。
 func (z *mdChunker) flush() {
-	if len(z.cur) == 0 {
-		return
-	}
-	content := strings.TrimSpace(strings.Join(z.cur, "\n"))
-	if content != "" {
-		z.chunks = append(z.chunks, mdChunk{heading: z.heading, content: content})
+	if len(z.cur) > 0 {
+		content := strings.TrimSpace(strings.Join(z.cur, "\n"))
+		if content != "" {
+			z.chunks = append(z.chunks, mdChunk{heading: z.heading, content: content})
+		}
 	}
 	z.cur = z.cur[:0]
 	z.curLen = 0
+	z.curIsCarry = false
 }
 
 // carryOverlap 把 cur 末尾 overlap 带入下一块（标题切块与长度切块共用）。
+// 携带后 cur 只含重叠尾、置 curIsCarry，由各块边界处的幻影块守卫消费（rag#41）。
 func (z *mdChunker) carryOverlap() {
 	tail := overlapTail(z.cur)
 	z.flush()
 	if tail != "" {
 		z.cur = append(z.cur, tail)
 		z.curLen = utf8.RuneCountInString(tail)
+		z.curIsCarry = true
 	}
+}
+
+// dropCarryTail 丢弃纯携带尾（rag#41）：cur 的全部内容 = 母块末尾 overlap 的
+// 逐字副本，母块已完整持有该文本——独立成块只是双路索引里的逐字重复块
+// （检索面母块+幻影块同时挤占 topK，索引面每个边界多付一次 embedding）。
+func (z *mdChunker) dropCarryTail() {
+	z.cur = z.cur[:0]
+	z.curLen = 0
+	z.curIsCarry = false
 }
 
 // handleLine 单行入块：超长行守卫（正文/代码块共用）/ 代码块保护 / 标题切换 /
@@ -327,7 +346,14 @@ func (z *mdChunker) handleLine(line string, more bool) {
 		return
 	}
 	if isFenceLine(line) {
+		wasInCode := z.inCodeBlock
 		z.inCodeBlock = !z.inCodeBlock
+		if wasInCode && len(z.cur) == 0 {
+			// 闭合围栏落在空 cur（代码块内 maxChunkRunes 强制 flush 刚切开）：
+			// 收留它只会让紧随的块边界旋出一个 content 仅为 "```" 的垃圾块
+			// （rag#41 同根因副产物）——围栏行无检索价值，丢弃。
+			return
+		}
 		z.appendLine(line)
 		return
 	}
@@ -340,9 +366,15 @@ func (z *mdChunker) handleLine(line string, more bool) {
 		return
 	}
 	if h, ok := mdHeading(line); ok {
-		if len(z.cur) > 0 {
+		switch {
+		case z.curIsCarry:
+			// 长度切块边界紧跟标题：cur 仅含携带尾，丢弃而非旋成独立块——
+			// 此前 carryOverlap 对纯尾巴取 overlapTail 返回 ""，flush 把
+			// 100-rune 尾巴顶着上一节标题旋成「幻影块」（rag#41）
+			z.dropCarryTail()
+		case len(z.cur) > 0:
 			z.carryOverlap()
-		} else {
+		default:
 			z.flush()
 		}
 		z.heading = h
@@ -360,7 +392,10 @@ func isFenceLine(line string) bool {
 // rune 等分成多块（heading 上下文保留）。硬切丢行内格式优于截断丢内容，且
 // 每块确定性 ≤ maxChunkRunes（此前正文路径截断、代码块路径不设防，两处漂移）。
 func (z *mdChunker) handleOverlongLine(line string) {
-	if len(z.cur) > 0 {
+	if z.curIsCarry {
+		// 纯携带尾不随硬切独立成块（rag#41：超长行边界与标题边界同型）
+		z.dropCarryTail()
+	} else if len(z.cur) > 0 {
 		z.flush()
 	}
 	for _, seg := range textutil.SplitRunes(line, maxChunkRunes) {
@@ -371,6 +406,7 @@ func (z *mdChunker) handleOverlongLine(line string) {
 func (z *mdChunker) appendLine(line string) {
 	z.cur = append(z.cur, line)
 	z.curLen += utf8.RuneCountInString(line)
+	z.curIsCarry = false // 追加了新内容，cur 不再是纯携带尾
 }
 
 // handleBodyLine 正文行：达目标块长则切块（单行超限守卫已前置 handleLine）。

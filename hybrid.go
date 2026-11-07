@@ -80,21 +80,31 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 // AsTool 工具化透传语义路（检索语义对 LLM 不可见——混合是检索器内部实现细节）。
 func (h *Hybrid) AsTool() tool.BaseTool { return h.vector.AsTool() }
 
-// FuseRRF 倒数排名融合：score=Σ 1/(k+rank_i)（rank 从 1 起），同 ID 跨路累加
-// （双路共识加权=混合检索的本意）；输出按得分降序、同分按 ID 字典序（确定性可重放），
-// 截 topK。lists 为空返回空。
+// FuseRRF 倒数排名融合：score=Σ 1/(k+rank_i)（rank 从 1 起），同 key 跨路累加
+// （双路共识加权=混合检索的本意）；输出按得分降序、同分按 key 字典序（确定性
+// 可重放），截 topK。lists 为空返回空。
+//
+// 融合 key 与去重语义（oagentkit/rag#40）：优先稳定 chunk 标识 ID（Local 与
+// Milvus 双路统一 file#chunk_N 格式）；无 ID 时回退 file+内容、再退纯内容——
+// 去重=同源去重（同一 chunk 的跨路副本归并），**不是**同内容跨文件去重：
+// 许可证头/告警模板等相同内容不同来源的 chunk 各自保留，此前以内容做 key
+// 让它们跨文件塌缩成一份且无信号。同一 list 内同 key 只计首个名次——同路
+// 重复不得给自己加权（此前同路两个副本各占一个 rank 给同一 key 双重计分，
+// 挤占 topK）。
 func FuseRRF(topK int, lists ...[]Chunk) []Chunk {
 	score := map[string]float64{}
 	best := map[string]Chunk{}
 	for _, chunks := range lists {
+		seen := make(map[string]bool, len(chunks)) // 同路同 key 只计一次名次
 		for i, c := range chunks {
-			key := c.ID
-			if key == "" {
-				key = c.Content
+			key := fuseKey(c)
+			if seen[key] {
+				continue
 			}
+			seen[key] = true
 			score[key] += 1 / float64(rrfK+i+1)
 			if prev, ok := best[key]; !ok || len(c.Content) > len(prev.Content) {
-				best[key] = c // 跨路同 ID 保留信息量最大的代表副本
+				best[key] = c // 跨路同 key 保留信息量最大的代表副本
 			}
 		}
 	}
@@ -121,4 +131,17 @@ func FuseRRF(topK int, lists ...[]Chunk) []Chunk {
 		out = append(out, c)
 	}
 	return out
+}
+
+// fuseKey 融合去重 key：ID → file+内容 → 内容（类型前缀防三类 key 互相碰撞）。
+// 无 ID 时纳入 Metadata["file"] 区分来源——同文件同内容仍是同源（归并），不同
+// 文件的相同内容互异（各自保留，rag#40）。
+func fuseKey(c Chunk) string {
+	if c.ID != "" {
+		return "id\x00" + c.ID
+	}
+	if f := c.Metadata["file"]; f != "" {
+		return "file\x00" + f + "\x00" + c.Content
+	}
+	return "content\x00" + c.Content
 }
