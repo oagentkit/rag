@@ -7,8 +7,8 @@ require (
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/oagentkit/textx v0.10.0
 	github.com/oekit/concurrency v0.27.0
-	github.com/oekit/logx v0.8.4
-	github.com/oekit/pkg v0.36.0
+	github.com/oekit/logx v0.8.5
+	github.com/oekit/pkg v0.37.0
 )
 
 require (
