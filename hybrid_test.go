@@ -149,9 +149,11 @@ func TestHybridDegradation(t *testing.T) {
 	if err != nil || len(got2) == 0 {
 		t.Fatalf("另一向失败应降级: %v %+v", err, got2)
 	}
-	// 双路全败 → 回 first error
+	// 双路全败 → 回 first error。词料路真失败借 Local 唯一错误缝注入（过滤
+	// 白名单校验报错；fakeLocalErr 是健康但空索引的 Local，属合法空命中而非
+	// 失败——rag#76 起不再与失败合流）；fakeKS 忽略 filter、按 err 桩失败。
 	h3 := NewHybrid(&fakeKS{err: errors.New("a")}, fakeLocalErr(t))
-	if _, err := h3.Retrieve(context.Background(), "q", 3, nil); err == nil {
+	if _, err := h3.Retrieve(context.Background(), "q", 3, Filter{"no_such_field": "x"}); err == nil {
 		t.Fatal("双路全败应回错")
 	}
 	// topK 截断
@@ -166,6 +168,30 @@ func TestHybridAsToolDelegates(t *testing.T) {
 	h := NewHybrid(&fakeKS{}, fakeLocal(t))
 	if h.AsTool() != nil {
 		t.Fatal("应透传语义路 AsTool（fake 返回 nil）")
+	}
+}
+
+// TestHybridLaneFailSurvivorEmptyHit 回归（rag#76）：单路普通故障 + 幸存路合法
+// 空命中 → 整体返回空 + nil，不得回错——「任一路失败降级另一路、双路全败才
+// 回错」契约：空命中是正常检索结果，调用方的降级/重试/报警链路不得被纯词汇
+// 不匹配触发。此前「成功但空」与「失败」在 len(lists)==0 合流，幸存路的
+// 「没搜到」被失败路放大成整体验索错误（实测返回 (nil, vector lane down)）。
+// panic 不在豁免面（自家 bug 不掩盖，见 TestHybridLanePanicDegrades）。
+func TestHybridLaneFailSurvivorEmptyHit(t *testing.T) {
+	// 向量路端点抖动 + 词料路健康但查询无词汇重叠 → 合法空命中
+	h := NewHybrid(&fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
+	got, err := h.Retrieve(context.Background(), "zzz-no-such-term-qqq", 3, nil)
+	if err != nil {
+		t.Fatalf("幸存路合法空命中不应回错（rag#76）: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("空命中应返回空结果: %+v", got)
+	}
+	// 幸存路非空时照常融合返回（降级契约不变，失败路丢弃）
+	h2 := NewHybrid(&fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
+	got2, err := h2.Retrieve(context.Background(), "kubernetes", 3, nil)
+	if err != nil || len(got2) == 0 {
+		t.Fatalf("单路失败降级另一路应正常返回: %v %+v", err, got2)
 	}
 }
 

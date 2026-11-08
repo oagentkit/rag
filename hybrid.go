@@ -32,7 +32,10 @@ func NewHybrid(vector KnowledgeService, keyword *Local) *Hybrid {
 }
 
 // Retrieve 双路并行检索 → RRF 融合 → topK。两路各取 topK*2 候选（融合后截断，
-// 候选池放大让跨路重叠有归并空间）；单路失败降级单路，双路全败回 first error。
+// 候选池放大让跨路重叠有归并空间）；单路失败降级另一路，双路全败回 first error。
+// 幸存路的合法空命中（该查询无词汇重叠等）是正常检索结果不是错误——返回空切片
+// + nil，不得被失败路放大成整体验索错误（rag#76）；失败面含 panic 时空结果不
+// 掩盖（自家 bug 必须暴露，见下）。
 // 双路经 syncx.FanInErr 收口（concurrency v0.5.0 起 Slot 三态）：路内 panic 不再
 // 伪装成空路，而是作为该路失败参与降级裁决——单路 panic 降级另一路，双路全败
 // （含 panic）回错不再静默返回空结果；恐慌经全局 handler 上报，不出宿主进程。
@@ -52,6 +55,7 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 
 	var lists [][]Chunk
 	var firstErr error
+	var anySuccess, anyPanic bool
 	for _, s := range slots {
 		// v0.7.0 起 panic 由 Slot.Err 承载 *async.PanicError（errors.As 可辨、
 		// 携带栈），Slot.Panicked 已废弃。区分 panic 与普通错误是为了给调用方
@@ -59,6 +63,7 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 		err := s.Err
 		var pe *async.PanicError
 		if errors.As(err, &pe) {
+			anyPanic = true
 			err = fmt.Errorf("rag: hybrid 检索路 panic: %w", pe)
 		}
 		if err != nil {
@@ -67,14 +72,25 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 			}
 			continue
 		}
+		anySuccess = true
 		if len(s.Val) > 0 {
 			lists = append(lists, s.Val)
 		}
 	}
-	if len(lists) == 0 {
-		return nil, firstErr
+	// 聚合裁决（rag#76）：非空结果优先——任一路命中即融合返回（失败路按降级
+	// 契约丢弃）。结果面为空时三分，不再把「成功但空」与「失败」合流：
+	//   - 至少一路成功（含合法空命中）且失败面无 panic → 返回空 + nil：空命中
+	//     是正常检索结果，调用方的降级/重试/报警链路不得被纯词汇不匹配触发；
+	//   - 失败面含 panic → 回 firstErr（自家 bug 不掩盖——空结果不得吞掉 panic
+	//     信号，TestHybridLanePanicDegrades 的刻意取舍）；
+	//   - 双路全败 → 回 firstErr。
+	if len(lists) > 0 {
+		return FuseRRF(topK, lists...), nil
 	}
-	return FuseRRF(topK, lists...), nil
+	if anySuccess && !anyPanic {
+		return FuseRRF(topK), nil
+	}
+	return nil, firstErr
 }
 
 // AsTool 工具化透传语义路（检索语义对 LLM 不可见——混合是检索器内部实现细节）。
