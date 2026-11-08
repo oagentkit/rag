@@ -319,6 +319,23 @@ func TestChunkMarkdownOverlongLineInCodeBlock(t *testing.T) {
 	}
 }
 
+// assertNoPhantomOverlapTail 通用幻影块断言：任何块不得是另一块末尾 overlap
+// 窗口的逐字副本（母块已持有该文本，独立成块即 rag#41/#60 的幻影形态）。
+func assertNoPhantomOverlapTail(t *testing.T, chunks []mdChunk) {
+	t.Helper()
+	for i, c := range chunks {
+		for j, o := range chunks {
+			if i == j {
+				continue
+			}
+			other := []rune(o.content)
+			if len(other) > overlapRunes && string(other[len(other)-overlapRunes:]) == c.content {
+				t.Fatalf("块 %d 是块 %d 末尾 %d rune 的逐字副本（幻影块）: %q", i, j, overlapRunes, c.content)
+			}
+		}
+	}
+}
+
 // TestChunkMarkdownNoPhantomCarryTail 回归（rag#41）：长度切块边界紧跟标题时，
 // carryOverlap 留下的 100-rune 纯重叠尾不得独立成块——该尾巴是母块末尾的逐字
 // 副本（此前实测：1300-rune 母块后跟一个 100-rune「幻影块」顶着上一节标题，
@@ -335,18 +352,7 @@ func TestChunkMarkdownNoPhantomCarryTail(t *testing.T) {
 	if chunks[0].heading != "甲节标题" || chunks[1].heading != "乙节标题" {
 		t.Fatalf("标题归属错: %+v", chunks)
 	}
-	// 通用断言：任何块不得是另一块末尾 overlap 窗口的逐字副本（幻影块形态）
-	for i, c := range chunks {
-		for j, o := range chunks {
-			if i == j {
-				continue
-			}
-			other := []rune(o.content)
-			if len(other) > overlapRunes && string(other[len(other)-overlapRunes:]) == c.content {
-				t.Fatalf("块 %d 是块 %d 末尾 %d rune 的逐字副本（幻影块）", i, j, overlapRunes)
-			}
-		}
-	}
+	assertNoPhantomOverlapTail(t, chunks)
 
 	// 对照组：边界后跟正文行（非标题）——携带尾正常作为下一块前缀保留。
 	// 修掉的是「纯尾巴独立成块」，不是重叠机制本身。
@@ -362,6 +368,41 @@ func TestChunkMarkdownNoPhantomCarryTail(t *testing.T) {
 	if !strings.HasPrefix(chunks2[1].content, string(mother[len(mother)-overlapRunes:])) {
 		t.Fatalf("对照组下一块应以携带尾开头: %q", chunks2[1].content)
 	}
+}
+
+// TestChunkMarkdownNoPhantomCarryTailBlankLine 回归（rag#60）：长度切块边界
+// 与下一标题之间隔着空行（markdown 段落常态）时，携带尾不得再旋成幻影块——
+// rag#41 的守卫只在边界行紧贴携带尾时生效，此前 appendLine 对空行也无条件
+// 翻回 curIsCarry=false 而 cur 仍只持有携带尾，下一边界走 carryOverlap+flush
+// 把母块末尾 100 rune 原样复制成独立块。
+func TestChunkMarkdownNoPhantomCarryTailBlankLine(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## 甲节标题\n\n")
+	b.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 100)) // 1200 rune 单行，跨 600 阈值
+	b.WriteString("\n\n## 乙节标题\n\n乙节正文。\n")             // 空行分隔（编辑器落盘常态）后接标题
+	chunks := chunkMarkdown(b.String())
+	if len(chunks) != 2 {
+		t.Fatalf("应 2 块（甲节母块+乙节），得到 %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].heading != "甲节标题" || chunks[1].heading != "乙节标题" {
+		t.Fatalf("标题归属错: %+v", chunks)
+	}
+	assertNoPhantomOverlapTail(t, chunks)
+}
+
+// TestChunkMarkdownNoPhantomCarryTailEOFNewline 回归（rag#60）：EOF 尾换行
+// （几乎所有编辑器落盘形态）在携带尾之后追加一个空行——此前同样翻回
+// curIsCarry，收尾 flush 把纯携带尾独立成块（100-rune 逐字幻影）。
+func TestChunkMarkdownNoPhantomCarryTailEOFNewline(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## 甲节标题\n\n")
+	b.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 130)) // 1300 rune 单行，跨 600 阈值
+	b.WriteString("\n")                                 // EOF 尾换行
+	chunks := chunkMarkdown(b.String())
+	if len(chunks) != 1 {
+		t.Fatalf("应 1 块（甲节母块），得到 %d: %+v", len(chunks), chunks)
+	}
+	assertNoPhantomOverlapTail(t, chunks)
 }
 
 // TestChunkMarkdownNoLoneFenceGarbageChunk 回归（rag#41 同根因副产物）：代码块

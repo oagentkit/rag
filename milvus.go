@@ -222,6 +222,9 @@ func truncateUTF8(s string, maxBytes int) string {
 // milvusFileStored file 字段的落库形态：不超限原样透传；超限截到上限内并附加
 // 全路径散列后缀。朴素截断会让共享长前缀的两个深路径文件 file 字段与主键同时
 // 碰撞（Upsert 互相覆盖 = 静默丢数据，比超限报错更坏），散列后缀保持唯一（rag#43）。
+// 也是跨路统一身份键（rag#59）：Local 侧 chunk ID、删除与过滤表达式一律由本
+// 函数归一——存储形态与查询形态必须同一，否则超限路径的删除/过滤/双路融合
+// 全部静默失效。限内路径为恒等，既有身份形态不变。
 func milvusFileStored(file string) string {
 	if len(file) <= milvusFileMaxLen {
 		return file
@@ -286,10 +289,25 @@ func (s *MilvusStore) upsertChunks(ctx context.Context, rows []milvusRow, vector
 	return nil
 }
 
-// DeleteFile 删除指定文件的所有索引数据。
+// DeleteFile 删除指定文件的所有索引数据。身份按落库形态归一（rag#59）：
+// 表达式必须命中截断+散列落库形态与调用方原始路径两种形态——此前只按 raw
+// 路径拼表达式，对超限截断落库的行永远命不中，删除静默 no-op，每次重索引
+// 累积 stale 行污染检索。
 func (s *MilvusStore) DeleteFile(ctx context.Context, file string) error {
-	expr := fmt.Sprintf(`%s == "%s"`, milvusFileField, escapeMilvus(file))
-	return s.client.Delete(ctx, s.cfg.Collection, "", expr)
+	return s.client.Delete(ctx, s.cfg.Collection, "", milvusDeleteExpr(file))
+}
+
+// milvusDeleteExpr 删除表达式：命中 file 字段的两种身份形态——落库形态
+// （milvusFileStored，indexRows 写入的即此形态）与原始路径（迁移期兜底历史/
+// 外部写入的 raw 行；表达式命不中的删除是静默 no-op）。限内路径两形态同串，
+// 退化为单条件等值（形态与历史版本一致）。
+func milvusDeleteExpr(file string) string {
+	stored := milvusFileStored(file)
+	if stored == file {
+		return fmt.Sprintf(`%s == "%s"`, milvusFileField, escapeMilvus(file))
+	}
+	return fmt.Sprintf(`(%s == "%s" or %s == "%s")`,
+		milvusFileField, escapeMilvus(stored), milvusFileField, escapeMilvus(file))
 }
 
 // Retrieve 实现 KnowledgeService 接口：向量相似度检索。
@@ -328,7 +346,10 @@ func (s *MilvusStore) embedQuery(ctx context.Context, query string) ([]float32, 
 }
 
 // milvusFilterExpr 构建过滤表达式：key 白名单校验走 validateFilter 单源
-// （Local/Milvus 同一契约），value 已转义。
+// （Local/Milvus 同一契约），value 已转义。file 过滤值归一到落库形态（rag#59）：
+// 列里存的是 milvusFileStored 形态，caller 传原始路径直接比对对超限路径恒空
+// ——查询形态与存储形态必须在边界统一。heading 不归一（展示元数据、无身份
+// 语义）：归一会把超限标题的过滤静默放宽为截断前缀匹配。
 func milvusFilterExpr(filter Filter) (string, error) {
 	if err := validateFilter(filter); err != nil {
 		return "", err
@@ -338,6 +359,9 @@ func milvusFilterExpr(filter Filter) (string, error) {
 	}
 	var parts []string
 	for k, v := range filter {
+		if k == milvusFileField {
+			v = milvusFileStored(v)
+		}
 		parts = append(parts, fmt.Sprintf(`%s == "%s"`, k, escapeMilvus(v)))
 	}
 	return strings.Join(parts, " and "), nil
