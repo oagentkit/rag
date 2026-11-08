@@ -234,3 +234,101 @@ func TestMilvusRowIDGuard(t *testing.T) {
 		t.Fatal("主键超限应报错（截断会碰撞）")
 	}
 }
+
+// fakeDeleteClient 捕获 Delete 表达式的假客户端（DeleteFile 表达式构造的
+// 行为面测试——表达式拼错在真实 Milvus 上是静默 no-op，从错误码感知不到）。
+type fakeDeleteClient struct {
+	client.Client
+	exprs []string
+}
+
+func (f *fakeDeleteClient) Delete(_ context.Context, _ string, _ string, expr string) error {
+	f.exprs = append(f.exprs, expr)
+	return nil
+}
+
+func newCaptureStore(fc *fakeDeleteClient) *MilvusStore {
+	return &MilvusStore{cfg: MilvusConfig{Collection: "t"}, client: fc, embedder: &mockEmbedder{dim: 4}}
+}
+
+// TestMilvusDeleteFileMatchesStoredForm 回归（rag#59）：超限路径落库为
+// 截断+散列形态（indexRows→milvusFileStored），DeleteFile 表达式必须命中该
+// 形态——此前按调用方原始路径拼表达式，对已落库行永远命不中，删除静默
+// no-op，每次重索引累积 stale 行污染检索。
+func TestMilvusDeleteFileMatchesStoredForm(t *testing.T) {
+	deep := strings.Repeat("深目录/", 128) + "one.md" // >512 字节深路径
+	fc := &fakeDeleteClient{}
+	if err := newCaptureStore(fc).DeleteFile(context.Background(), deep); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.exprs) != 1 {
+		t.Fatalf("应执行 1 次删除，得到 %d", len(fc.exprs))
+	}
+	stored := escapeMilvus(milvusFileStored(deep))
+	if !strings.Contains(fc.exprs[0], stored) {
+		t.Fatalf("删除表达式未命中落库形态 %q: %s", stored, fc.exprs[0])
+	}
+	// 迁移期双删：raw 形态也保留在表达式中（兜底历史/外部写入的 raw 行）
+	if !strings.Contains(fc.exprs[0], escapeMilvus(deep)) {
+		t.Fatalf("删除表达式应保留 raw 形态（迁移双删）: %s", fc.exprs[0])
+	}
+
+	// 限内路径 stored == raw：表达式退化为单条件等值，形态与既有一致
+	fc2 := &fakeDeleteClient{}
+	if err := newCaptureStore(fc2).DeleteFile(context.Background(), "doc.md"); err != nil {
+		t.Fatal(err)
+	}
+	if fc2.exprs[0] != `file == "doc.md"` {
+		t.Fatalf("限内路径删除表达式形态不应变化: %s", fc2.exprs[0])
+	}
+}
+
+// TestMilvusFilterExprFileIdentity 回归（rag#59）：file 过滤值必须归一到落库
+// 形态再与列值比对——此前 caller 传原始路径、列里是截断+散列形态，超限路径
+// 的 Filter 静默恒空。
+func TestMilvusFilterExprFileIdentity(t *testing.T) {
+	deep := strings.Repeat("深目录/", 128) + "one.md"
+	expr, err := milvusFilterExpr(Filter{"file": deep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := escapeMilvus(milvusFileStored(deep))
+	if !strings.Contains(expr, stored) {
+		t.Fatalf("过滤表达式未归一到落库形态 %q: %s", stored, expr)
+	}
+	// 限内路径归一为恒等：表达式形态不变
+	expr2, err := milvusFilterExpr(Filter{"file": "doc.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expr2 != `file == "doc.md"` {
+		t.Fatalf("限内路径过滤表达式形态不应变化: %s", expr2)
+	}
+}
+
+// TestCrossLaneChunkIDAgreeOnStoredIdentity 回归（rag#59）：同一文件的 chunk
+// ID 在两条索引路必须一致——Milvus 主键由落库形态派生，Local 此前由原始 rel
+// 路径派生，超限路径双路 ID 永不相等，FuseRRF 按 ID 归并双路共识静默失效
+// （同源副本无法归并，混合检索退化为两路各自计分）。
+func TestCrossLaneChunkIDAgreeOnStoredIdentity(t *testing.T) {
+	deep := strings.Repeat("深目录/", 128) + "one.md" // >512 字节 rel 路径
+	rows, err := indexRows(deep, chunkMarkdown("# 甲\n\n正文。\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idx []indexedChunk
+	df := map[string]int{}
+	indexMarkdownFile(deep, "# 甲\n\n正文。\n", &idx, df)
+	if len(rows) == 0 || len(idx) == 0 {
+		t.Fatalf("两路都应产出 chunk: milvus=%d local=%d", len(rows), len(idx))
+	}
+	if idx[0].chunk.ID != rows[0].id {
+		t.Fatalf("双路 ID 分裂: local=%q milvus=%q", idx[0].chunk.ID, rows[0].id)
+	}
+	// 限内路径 raw == stored：Local ID 形态保持不变
+	var idx2 []indexedChunk
+	indexMarkdownFile("doc.md", "# 乙\n\n正文。\n", &idx2, df)
+	if idx2[0].chunk.ID != "doc.md#chunk_0" {
+		t.Fatalf("限内路径 Local ID 形态不应变化: %q", idx2[0].chunk.ID)
+	}
+}

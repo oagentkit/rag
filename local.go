@@ -249,8 +249,14 @@ func indexMarkdownFile(rel, data string, index *[]indexedChunk, df map[string]in
 			chunk: Chunk{
 				// 确定性 ID（rel#chunk_N，与 Milvus 主键同格式）：FuseRRF 按
 				// ID 跨路归并共识；此前 ID 恒空，融合退化为按内容做 key——
-				// 同内容跨文件塌缩 + 同路自增强（rag#40）
-				ID:       chunkID(rel, i),
+				// 同内容跨文件塌缩 + 同路自增强挤占 topK（rag#40）。
+				//
+				// 身份键走落库形态 milvusFileStored（rag#59）：超过 milvusFileMaxLen
+				// 的深路径与 Milvus 主键同一截断+散列形态派生，限内路径为恒等
+				// （ID 形态不变）——此前 Local 用原始 rel 派生，超限路径双路 ID
+				// 永不相等，FuseRRF 跨路共识静默失效。Metadata["file"] 仍存
+				// 原始 rel（Local 无列宽限制，caller 传什么过滤什么）。
+				ID:       chunkID(milvusFileStored(rel), i),
 				Content:  c.content,
 				Metadata: map[string]string{"file": rel, "heading": c.heading},
 			},
@@ -297,23 +303,31 @@ type mdChunker struct {
 	// 此状态下再遇块边界（标题/超长行/闭合围栏）不得把尾巴独立成块——
 	// 母块已逐字持有该文本，独立块是纯重复的「幻影块」（rag#41）。
 	curIsCarry bool
+	// carryTail curIsCarry 时 cur 持有的携带尾原文。空行（含 EOF 尾换行切出
+	// 的末空行）不构成新内容，curIsCarry 状态必须跨过它们存活——此前空行把
+	// 状态翻回 false 而 cur 仍只有尾，下一边界把纯尾再旋成逐字幻影块
+	// （rag#60）。flush 再按内容比对兜底：即使状态意外失守，纯尾也不落块。
+	carryTail string
 }
 
-// flush 当前累积行成块（无实质内容则丢弃）。
+// flush 当前累积行成块。无实质内容丢弃；cur 恰好只含携带尾也丢弃——母块已
+// 完整持有该文本，独立成块只是逐字幻影（rag#41/#60）。
 func (z *mdChunker) flush() {
 	if len(z.cur) > 0 {
 		content := strings.TrimSpace(strings.Join(z.cur, "\n"))
-		if content != "" {
+		if content != "" && content != z.carryTail {
 			z.chunks = append(z.chunks, mdChunk{heading: z.heading, content: content})
 		}
 	}
 	z.cur = z.cur[:0]
 	z.curLen = 0
 	z.curIsCarry = false
+	z.carryTail = ""
 }
 
 // carryOverlap 把 cur 末尾 overlap 带入下一块（标题切块与长度切块共用）。
-// 携带后 cur 只含重叠尾、置 curIsCarry，由各块边界处的幻影块守卫消费（rag#41）。
+// 携带后 cur 只含重叠尾、置 curIsCarry + 记录尾原文，由各块边界处的幻影块
+// 守卫消费（rag#41/#60）。
 func (z *mdChunker) carryOverlap() {
 	tail := overlapTail(z.cur)
 	z.flush()
@@ -321,6 +335,7 @@ func (z *mdChunker) carryOverlap() {
 		z.cur = append(z.cur, tail)
 		z.curLen = utf8.RuneCountInString(tail)
 		z.curIsCarry = true
+		z.carryTail = tail
 	}
 }
 
@@ -331,6 +346,7 @@ func (z *mdChunker) dropCarryTail() {
 	z.cur = z.cur[:0]
 	z.curLen = 0
 	z.curIsCarry = false
+	z.carryTail = ""
 }
 
 // handleLine 单行入块：超长行守卫（正文/代码块共用）/ 代码块保护 / 标题切换 /
@@ -406,7 +422,13 @@ func (z *mdChunker) handleOverlongLine(line string) {
 func (z *mdChunker) appendLine(line string) {
 	z.cur = append(z.cur, line)
 	z.curLen += utf8.RuneCountInString(line)
-	z.curIsCarry = false // 追加了新内容，cur 不再是纯携带尾
+	if line != "" {
+		// 追加了新内容，cur 不再是纯携带尾。空行不算新内容（零 rune，对块
+		// 文本零贡献）——纯携带尾状态必须跨过它存活，否则长度边界与下一
+		// 边界之间隔着空行/EOF 尾换行时，纯尾又被旋成逐字幻影块（rag#60）。
+		z.curIsCarry = false
+		z.carryTail = ""
+	}
 }
 
 // handleBodyLine 正文行：达目标块长则切块（单行超限守卫已前置 handleLine）。
