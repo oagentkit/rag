@@ -2,6 +2,18 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.11.3] — 2026-11-08
+
+### 修复(chunker,milvus)：幻影块守卫跨空行/EOF 存活 + 文件身份键全链路统一（rag#60 rag#59）
+
+Merge branch 'main' into fix/audit-issues-60-59
+
+- 杂务(deps)：依赖地板追到最新——基座 v0.38.0/v0.29.0/v0.8.11 + 矩阵 tier0 新 tag（按本仓依赖取齐）
+
+发版时刻地板时效门禁要求追平。
+兼容性实测：go build / go vet / go test -race -count=1 ./... 全绿，go mod tidy -diff 无漂移。
+
+
 ## [v0.11.2] — 2026-11-08
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/logx v0.8.10
