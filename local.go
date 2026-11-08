@@ -311,11 +311,13 @@ type mdChunker struct {
 }
 
 // flush 当前累积行成块。无实质内容丢弃；cur 恰好只含携带尾也丢弃——母块已
-// 完整持有该文本，独立成块只是逐字幻影（rag#41/#60）。
+// 完整持有该文本，独立成块只是逐字幻影（rag#41/#60）。兜底比对对 TrimSpace
+// 后的 carryTail 做（rag#75 双保险）：即使取尾/状态侧意外带进尾随空白，母块
+// 落盘内容的真后缀仍被识别为幻影，不因 raw 逐字比对失守而落块。
 func (z *mdChunker) flush() {
 	if len(z.cur) > 0 {
 		content := strings.TrimSpace(strings.Join(z.cur, "\n"))
-		if content != "" && content != z.carryTail {
+		if content != "" && content != strings.TrimSpace(z.carryTail) {
 			z.chunks = append(z.chunks, mdChunk{heading: z.heading, content: content})
 		}
 	}
@@ -444,11 +446,15 @@ func (z *mdChunker) handleBodyLine(line string, more bool) {
 }
 
 // overlapTail 取块文本末尾 overlapRunes 个字符（不足阈值返回 ""=不携带）。
+// 对 TrimSpace 后的块文本（母块实际落盘形态）取尾（rag#75）：携带尾恒为母块
+// 内容的真后缀——此前对 raw join 取尾，cur 以空行收尾时（空行紧贴标题边界）
+// 末 rune 是空行贡献的 \n，carryTail 带尾 \n 落账，EOF flush 的 TrimSpace 内容
+// 与之不等，幻影块守卫逐字比对失守，母块尾的逐字副本顶着下一节标题进索引。
 func overlapTail(cur []string) string {
 	if overlapRunes <= 0 || len(cur) == 0 {
 		return ""
 	}
-	runes := []rune(strings.Join(cur, "\n"))
+	runes := []rune(strings.TrimSpace(strings.Join(cur, "\n")))
 	if len(runes) <= overlapRunes {
 		return ""
 	}

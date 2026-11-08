@@ -405,6 +405,48 @@ func TestChunkMarkdownNoPhantomCarryTailEOFNewline(t *testing.T) {
 	assertNoPhantomOverlapTail(t, chunks)
 }
 
+// TestChunkMarkdownNoPhantomCarryTailBlankLineHeadingEOF 回归（rag#75）：
+// 「空行紧贴标题 + 文件以裸标题收尾（EOF）」形态——carry 发生在标题边界且
+// cur 以空行收尾，此前 overlapTail 对 raw join 取尾时末 rune 是空行贡献的
+// \n，carryTail 带尾 \n 落账，EOF flush 的 TrimSpace 内容与之不等，幻影块
+// 守卫逐字比对失守（实测 chunks=2：幻影块顶着「乙节标题」、内容恰为母块
+// 末尾 99 rune 逐字副本，Local 与 Milvus 双路索引同时被污染）。修复后取尾
+// 对 TrimSpace 后的母块落盘文本做（携带尾恒为真后缀）+ flush 兜底比对
+// TrimSpace(carryTail) 双保险。
+func TestChunkMarkdownNoPhantomCarryTailBlankLineHeadingEOF(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## 甲节标题\n\n")
+	b.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 32)) // 416 rune，不跨 600 阈值（carry 发生在标题边界）
+	b.WriteString("\n\n## 乙节标题")                       // 空行紧贴标题 + 文件以裸标题收尾
+	chunks := chunkMarkdown(b.String())
+	if len(chunks) != 1 {
+		t.Fatalf("应 1 块（乙节空节不得旋出幻影块）, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].heading != "甲节标题" {
+		t.Fatalf("唯一块应是甲节母块: %+v", chunks)
+	}
+	assertNoPhantomOverlapTail(t, chunks)
+
+	// 对照组：末尾标题带正文——携带尾照常作为乙节块前缀保留（修的是幻影，
+	// 不是携带机制本身），且携带尾必须是母块内容的真后缀（TrimSpace 后形态）。
+	var c2 strings.Builder
+	c2.WriteString("## 甲节标题\n\n")
+	c2.WriteString(strings.Repeat("甲节正文内容用于触发切块。", 32))
+	c2.WriteString("\n\n## 乙节标题\n\n乙节正文。\n")
+	chunks2 := chunkMarkdown(c2.String())
+	if len(chunks2) != 2 {
+		t.Fatalf("对照组应 2 块（甲节母块+乙节）, got %d: %+v", len(chunks2), chunks2)
+	}
+	if chunks2[1].heading != "乙节标题" {
+		t.Fatalf("对照组标题归属错: %+v", chunks2)
+	}
+	mother := []rune(chunks2[0].content)
+	if !strings.HasPrefix(chunks2[1].content, string(mother[len(mother)-overlapRunes:])) {
+		t.Fatalf("乙节块应以携带尾（母块真后缀）开头: %q", chunks2[1].content)
+	}
+	assertNoPhantomOverlapTail(t, chunks2)
+}
+
 // TestChunkMarkdownNoLoneFenceGarbageChunk 回归（rag#41 同根因副产物）：代码块
 // 内 maxChunkRunes 强制 flush 后紧跟围栏闭合行，不得产出 content 仅为 "```"
 // 的垃圾块（闭合围栏落在空 cur 时丢弃——围栏行无检索价值）。
