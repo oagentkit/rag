@@ -472,8 +472,14 @@ func mdHeading(line string) (string, bool) {
 	return "", false
 }
 
-// tokenize 分词：ASCII 词（小写）+ CJK 二元组（单字成词时补单字）。
-// 字节偏移迭代：CJK bigram 直接切原串子串（零拷贝），ASCII 词写入即小写
+// tokenize 分词：ASCII 词（小写）+ 非 ASCII 字母二元组（单字成词时补单字）。
+// 二元组覆盖一切非 ASCII 字母——Han/谚文/假名/西里尔/希腊等一律成对（后邻
+// 也是非 ASCII 字母时），不再按脚本取舍：oagentkit/rag#84 旧实现只认 Han，
+// 谚文/假名文档索引成零词元、查询恒空，整类语言静默不可检索。
+// 查询与文档共用本函数，二元组切分两侧一致，重叠即召回。
+// 局限（有意为之）：非 ASCII 字母不折大小写（零拷贝切原串子串）；数字与非
+// ASCII 字母不互连（各自成词）。
+// 字节偏移迭代：bigram 直接切原串子串（零拷贝），ASCII 词写入即小写
 // （词内只可能是 ASCII 字母/数字，小写化只影响 A-Z），避免 []rune 全量拷贝。
 func tokenize(s string) []string {
 	var out []string
@@ -491,12 +497,12 @@ func tokenize(s string) []string {
 				r += 'a' - 'A'
 			}
 			word = utf8.AppendRune(word, r)
-		case unicode.Is(unicode.Han, r):
+		case r >= 128 && unicode.IsLetter(r):
 			addWord()
 			size := utf8.RuneLen(r)
 			end := i + size
 			if end < len(s) {
-				if r2, size2 := utf8.DecodeRuneInString(s[end:]); unicode.Is(unicode.Han, r2) {
+				if r2, size2 := utf8.DecodeRuneInString(s[end:]); r2 >= 128 && unicode.IsLetter(r2) {
 					out = append(out, s[i:end+size2])
 				} else {
 					out = append(out, s[i:end])
