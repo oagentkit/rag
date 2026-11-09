@@ -351,16 +351,21 @@ func (z *mdChunker) dropCarryTail() {
 	z.carryTail = ""
 }
 
-// handleLine 单行入块：超长行守卫（正文/代码块共用）/ 代码块保护 / 标题切换 /
-// 长度切块。more=是否还有后续行（末行到阈值只 flush，不带 overlap——没有下一
-// 块可带入）。
+// handleLine 单行入块：超长行守卫（正文/围栏行/代码块共用）/ 代码块保护 /
+// 标题切换 / 长度切块。more=是否还有后续行（末行到阈值只 flush，不带
+// overlap——没有下一块可带入）。
 func (z *mdChunker) handleLine(line string, more bool) {
 	// 单行超限守卫前置：粘贴 base64/超长日志恰恰常包在代码围栏里，此前守卫
 	// 只在正文路径——代码块内单条超长行直接越过 Milvus VarChar 65535 字节
 	// 上限，flush 出的单块让整个文件（含正常段落）Insert 失败（第六轮审计
-	// C 级）。围栏行不切（切了会破坏开/闭状态机配对）。
-	if !isFenceLine(line) && utf8.RuneCountInString(line) > maxChunkRunes {
-		z.handleOverlongLine(line)
+	// C 级）。围栏行同样受守卫（issue#85）：豁免曾让 "```+粘贴内容" 整行
+	// 进块（实测 70003 字节单块），硬切时状态机按整行翻转一次不破坏配对。
+	if utf8.RuneCountInString(line) > maxChunkRunes {
+		if isFenceLine(line) {
+			z.handleOverlongFenceLine(line)
+		} else {
+			z.handleOverlongLine(line)
+		}
 		return
 	}
 	if isFenceLine(line) {
@@ -372,10 +377,21 @@ func (z *mdChunker) handleLine(line string, more bool) {
 			// （rag#41 同根因副产物）——围栏行无检索价值，丢弃。
 			return
 		}
+		// 围栏行也受块硬上限投影守卫（issue#85）：近满 cur 整行追加会把块
+		// 顶过 maxChunkRunes（curLen 不计 join 换行，行数多的块被换行顶爆）。
+		if z.overHardCap(line) {
+			z.flushBeforeHardSplit()
+		}
 		z.appendLine(line)
 		return
 	}
 	if z.inCodeBlock {
+		// 追加前先判硬上限投影（issue#85）：此前「先追加后判阈值」让
+		// <maxChunkRunes 的存量加尾行合成 ~2×maxChunkRunes 的块（换行
+		// 占长不计入 curLen，实测 4799 rune）。
+		if z.overHardCap(line) {
+			z.flushBeforeHardSplit()
+		}
 		z.appendLine(line)
 		// 多行累积守卫：未闭合代码块 + 超长内容强制成块
 		if z.curLen >= maxChunkRunes {
@@ -401,6 +417,27 @@ func (z *mdChunker) handleLine(line string, more bool) {
 	z.handleBodyLine(line, more)
 }
 
+// overHardCap 追加 line 后当前块的投影长度是否越过 maxChunkRunes 硬上限
+// （issue#85）。块落盘形态是 TrimSpace(join(cur, "\n"))：curLen 只累计行内
+// rune，行间 join 的换行（追加后共 len(cur) 个）同样占长——不计它则逐行块
+// 膨胀越过声明上界（4000-rune 存量实测冲到 4799）。TrimSpace 只缩不涨，
+// 投影式是块长的保守上界；curLen==0（cur 只含空行）时前导换行被 TrimSpace
+// 吃掉，投影即 line 本身，单行守卫已保证 ≤ maxChunkRunes。
+func (z *mdChunker) overHardCap(line string) bool {
+	return z.curLen > 0 && z.curLen+utf8.RuneCountInString(line)+len(z.cur) > maxChunkRunes
+}
+
+// flushBeforeHardSplit 硬切/硬上限边界收块（与 handleOverlongLine 同一边界
+// 语义）：纯携带尾丢弃（母块已持有，独立成块即幻影，rag#41）；实质内容
+// plain flush——硬上限边界不带 overlap，对齐超长行硬切路径。
+func (z *mdChunker) flushBeforeHardSplit() {
+	if z.curIsCarry {
+		z.dropCarryTail()
+	} else if len(z.cur) > 0 {
+		z.flush()
+	}
+}
+
 // isFenceLine 代码围栏行（``` 开头，可带语言标注）。
 func isFenceLine(line string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "```")
@@ -410,15 +447,21 @@ func isFenceLine(line string) bool {
 // rune 等分成多块（heading 上下文保留）。硬切丢行内格式优于截断丢内容，且
 // 每块确定性 ≤ maxChunkRunes（此前正文路径截断、代码块路径不设防，两处漂移）。
 func (z *mdChunker) handleOverlongLine(line string) {
-	if z.curIsCarry {
-		// 纯携带尾不随硬切独立成块（rag#41：超长行边界与标题边界同型）
-		z.dropCarryTail()
-	} else if len(z.cur) > 0 {
-		z.flush()
-	}
+	z.flushBeforeHardSplit()
 	for _, seg := range textutil.SplitRunes(line, maxChunkRunes) {
 		z.chunks = append(z.chunks, mdChunk{heading: z.heading, content: seg})
 	}
+}
+
+// handleOverlongFenceLine 超长围栏行硬切（issue#85）：围栏行曾豁免单行守卫，
+// "``` + 粘贴内容" 整行 appendLine 进块，单块可达任意长度（实测 70003 字节，
+// 越过 Milvus VarChar 65535 上限，整文件 Upsert 被拒）。开/闭状态机按整行
+// 翻转一次（配对不破坏），行内容随后走 handleOverlongLine 同一硬切入口
+// （SplitRunes 保序等分，每块确定性 ≤ maxChunkRunes）；超长围栏行携带的
+// 大块内容有检索价值，不适用短围栏「空 cur 丢弃」规则。
+func (z *mdChunker) handleOverlongFenceLine(line string) {
+	z.inCodeBlock = !z.inCodeBlock
+	z.handleOverlongLine(line)
 }
 
 func (z *mdChunker) appendLine(line string) {
@@ -434,7 +477,13 @@ func (z *mdChunker) appendLine(line string) {
 }
 
 // handleBodyLine 正文行：达目标块长则切块（单行超限守卫已前置 handleLine）。
+// 追加前先判块硬上限投影（issue#85）：此前「先追加后判阈值」让未达阈值的
+// 上文（≤599 rune 或 100-rune 携带尾）+ 恰好 ≤maxChunkRunes 的单行合成
+// >maxChunkRunes 的块（实测 4101 rune），违反 maxChunkRunes 的块硬上限声明。
 func (z *mdChunker) handleBodyLine(line string, more bool) {
+	if z.overHardCap(line) {
+		z.flushBeforeHardSplit()
+	}
 	z.appendLine(line)
 	if z.curLen >= chunkTargetRunes {
 		if more {

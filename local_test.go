@@ -319,6 +319,77 @@ func TestChunkMarkdownOverlongLineInCodeBlock(t *testing.T) {
 	}
 }
 
+// TestChunkMarkdownHardCapAllShapes 回归（rag#85）：「单块 ≤ maxChunkRunes」
+// 不变量在任何形态下成立。此前多处漏洞可产出远超上限的块，超 Milvus
+// VarChar 65535 字节上限后整文件 Upsert 被拒：
+//   - 围栏行豁免单行守卫："``` + 70000 字符" 整行进块 → 70003 字节单块；
+//   - handleBodyLine「先追加后判阈值」：未达阈值的上文（≤599 rune 或
+//     100-rune 携带尾）+ 恰好 ≤maxChunkRunes 的单行 → 4101/4001 rune 块；
+//   - curLen 只计行内 rune、不计 join 换行：逐行代码块/近满 cur 追加围栏行
+//     实测冲到 4799 rune。
+// 反证样本逐一覆盖，断言 rune 与字节双上限（字节对齐 Milvus VarChar）。
+func TestChunkMarkdownHardCapAllShapes(t *testing.T) {
+	cases := map[string]string{
+		// 形态 A（issue#85 实测 4101）：600-rune 上文 + 4000-rune 单行
+		"body_4000_after_context": "# T\n\n" + strings.Repeat("B", 600) + "\n" + strings.Repeat("A", 4000) + "\n",
+		// 形态 B（issue#85 实测 70003 字节）：围栏行豁免守卫，整行进块
+		"overlong_fence_line": "```" + strings.Repeat("C", 70000) + "\n",
+		// 携带尾(100) + 3900-rune 单行 = 4001（形态 A 同根因）
+		"carry_tail_plus_3900": "## 标\n\n" + strings.Repeat("乙", 600) + "\n" + strings.Repeat("丙", 3900) + "\n",
+		// 逐行代码块：curLen 不计 join 换行，强制 flush 出 ~4799 rune 块
+		"code_block_newline_inflation": "```go\n" + strings.Repeat("x = 1\n", 1000),
+		// 近满 cur + 短围栏行整行追加（NoLoneFence 几何形态，~4797 rune）
+		"short_fence_after_full_cur": "```go\n" + strings.Repeat("x = 1\n", maxChunkRunes/5-1) + "```\n\n## 下一节\n\n正文。\n",
+	}
+	for name, md := range cases {
+		for i, c := range chunkMarkdown(md) {
+			if n := utf8.RuneCountInString(c.content); n > maxChunkRunes {
+				t.Errorf("[%s] 块 %d = %d rune 超过硬上限 %d", name, i, n, maxChunkRunes)
+			}
+			if n := len(c.content); n > 65535 {
+				t.Errorf("[%s] 块 %d = %d 字节超过 Milvus VarChar 上限 65535", name, i, n)
+			}
+		}
+	}
+}
+
+// TestChunkMarkdownOverlongFenceLineSplitsPreservingPairing 回归（rag#85）：
+// 超长围栏行按 maxChunkRunes 保序硬切成多块（每块 ≤ 上限），且开/闭状态机
+// 按整行翻转一次——后续行仍按代码块语义处理，闭合围栏照常配对，围栏闭合后
+// 正文恢复常规切块（切分不得破坏状态机配对）。
+func TestChunkMarkdownOverlongFenceLineSplitsPreservingPairing(t *testing.T) {
+	md := "```python" + strings.Repeat("C", 70000) + "\nin code line\n```\n\n## 下一节\n\n正文段落。\n"
+	chunks := chunkMarkdown(md)
+
+	total := 0
+	for i, c := range chunks {
+		if n := utf8.RuneCountInString(c.content); n > maxChunkRunes {
+			t.Fatalf("块 %d = %d rune 超过硬上限 %d", i, n, maxChunkRunes)
+		}
+		total += strings.Count(c.content, "C")
+	}
+	if total != 70000 {
+		t.Fatalf("硬切应保序保留全部内容：C 计数 %d ≠ 70000", total)
+	}
+	if !strings.HasPrefix(chunks[0].content, "```python") {
+		t.Fatalf("首块应保留围栏前缀: %.20q", chunks[0].content)
+	}
+	for i, c := range chunks {
+		if strings.TrimSpace(c.content) == "```" {
+			t.Fatalf("块 %d 是孤立围栏垃圾块", i)
+		}
+	}
+	found := false
+	for _, c := range chunks {
+		if c.heading == "下一节" && strings.Contains(c.content, "正文段落。") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("围栏闭合后正文应照常成块: %+v", chunks)
+	}
+}
+
 // assertNoPhantomOverlapTail 通用幻影块断言：任何块不得是另一块末尾 overlap
 // 窗口的逐字副本（母块已持有该文本，独立成块即 rag#41/#60 的幻影形态）。
 func assertNoPhantomOverlapTail(t *testing.T, chunks []mdChunk) {
