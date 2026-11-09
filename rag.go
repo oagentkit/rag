@@ -1,6 +1,6 @@
 // Package rag 知识检索服务。
 // 提供两种后端：Local（本地 TF-IDF）和 MilvusStore（向量数据库）。
-// 检索算法 = 词元重叠打分（ASCII 词 + CJK 二元组）或向量相似度，
+// 检索算法 = 词元重叠打分（ASCII 词 + 非 ASCII 字母二元组）或向量相似度，
 // 零外部向量库依赖（Local）或 Milvus 向量数据库（MilvusStore）。
 package rag
 
