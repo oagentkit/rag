@@ -243,10 +243,13 @@ func milvusRowID(fileStored string, seq int) (string, error) {
 	return id, nil
 }
 
-// indexRows 索引行准备——所有 VarChar 标量字段按字节守卫（rag#43）：content 由
-// chunker 的 maxChunkRunes 保证（≤4000 rune ≤16000 字节）；heading 超限按 rune
-// 边界截断（标题仅是展示/过滤元数据，内容全文保留在 content 字段）；file 超限
-// 截断+散列后缀保唯一；id 超限报错。
+// indexRows 索引行准备——所有 VarChar 标量字段按字节守卫（rag#43）：content
+// 由 chunker 的 maxChunkRunes 保证（≤4000 rune ≤16000 字节），并按字节独立
+// 兜底截断（issue#85：围栏行豁免曾让单块 70003 字节——正确性外包给 chunker
+// 不变量已被证伪一次，守卫就地兜底不再假设上游恒真；超限告警后照常落库，
+// 避免错误埋进 Milvus 服务端深处、整文件 Upsert 被拒）；heading 超限按 rune
+// 边界截断（标题仅是展示/过滤元数据，内容全文保留在 content 字段）；file
+// 超限截断+散列后缀保唯一；id 超限报错。
 func indexRows(file string, chunks []mdChunk) ([]milvusRow, error) {
 	file = milvusFileStored(file)
 	rows := make([]milvusRow, len(chunks))
@@ -255,9 +258,15 @@ func indexRows(file string, chunks []mdChunk) ([]milvusRow, error) {
 		if err != nil {
 			return nil, err
 		}
+		content := c.content
+		if len(content) > milvusContentMaxLen {
+			ragLog.Warn("agentkit.rag.milvus_content_overlimit",
+				"chunk", i, "bytes", len(content), "max", milvusContentMaxLen)
+			content = truncateUTF8(content, milvusContentMaxLen)
+		}
 		rows[i] = milvusRow{
 			id:      id,
-			content: c.content,
+			content: content,
 			heading: truncateUTF8(c.heading, milvusHeadingMaxLen),
 			file:    file,
 		}

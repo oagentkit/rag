@@ -215,6 +215,37 @@ func TestIndexRowsVarCharGuards(t *testing.T) {
 	}
 }
 
+// TestIndexRowsContentByteGuard 回归（rag#85）：content 独立字节守卫——此前
+// content 的正确性外包给 chunker 的 maxChunkRunes 不变量，围栏行豁免证明该
+// 不变量并不成立（单块实测 70003 字节），超限错误埋进 Milvus 服务端报错深处、
+// 整文件 Upsert 被拒。对齐 heading/file 的处理：超限按字节边界截断（不劈
+// 多字节字符），不再假设上游不变量恒真。
+func TestIndexRowsContentByteGuard(t *testing.T) {
+	over := strings.Repeat("长", 30000) // 90000 字节 > 65535
+	rows, err := indexRows("doc.md", []mdChunk{{heading: "标题", content: over}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("应 1 行: %d", len(rows))
+	}
+	if got := len(rows[0].content); got > milvusContentMaxLen {
+		t.Fatalf("content %d 字节超限 %d", got, milvusContentMaxLen)
+	}
+	if !utf8.ValidString(rows[0].content) || !strings.HasPrefix(over, rows[0].content) {
+		t.Fatal("content 截断应保前缀且不破坏 UTF-8")
+	}
+
+	// 限内原样透传（不截断，既有形态不变）
+	rows2, err := indexRows("doc.md", []mdChunk{{content: "正文。"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows2[0].content != "正文。" {
+		t.Fatalf("限内 content 应原样: %q", rows2[0].content)
+	}
+}
+
 // TestMilvusRowIDGuard 主键字节守卫（rag#43）：主键不可截断——截断会跨文件
 // 碰撞覆盖；超限 fail-fast 报错注明字段与上限。file 存储形态 ≤512 字节时
 // id 上界=512+len("#chunk_N")，序号达 10 位才触界（单文件 1e9 块不存在，
