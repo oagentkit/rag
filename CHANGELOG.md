@@ -2,6 +2,22 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.11.8] — 2026-11-11
+
+### 修复(milvus,local)：存在路径形状校验 + 错误字段标准名（#97 #98）
+
+- #97 ensureCollection 的「已存在」路径补 DescribeCollection 形状校验：
+  向量维度与本仓配置一致、主键字段名/四字段形状兼容，漂移在构造期显式
+  报错——旧版本/外部工具建出的集合不再「构造期全绿、首次读写才在服务端
+  深处炸」；未加载（外部建而不 load / 手工 release）时补 LoadCollection，
+  与创建路径收尾加载同语义。dim 漂移带病运行的代价是写入期炸在
+  IndexQuiet 的 delete-已执行窗口（文件从检索面消失），必须拒绝
+- #98 重扫路径 3 处错误字段从手写 "error" 字面量改 logx.ErrKey（"err"）——
+  两矩阵落同一 Loki/ES，查询侧不再 OR 双写
+（#97 的运行时校验逻辑依赖真实 Milvus，单测覆盖不了 GetLoadState 分支；
+集成测试 milvus_integration_test.go 常规 CI 不跑。逻辑面以 sdk 类型编译期
+校验 + 既有单测回归。）
+
 ## [v0.11.7] — 2026-11-10
 
 ### 修复(chunking)：单块 ≤ maxChunkRunes 不变量在任何形态下成立（#85）
