@@ -327,6 +327,7 @@ func TestChunkMarkdownOverlongLineInCodeBlock(t *testing.T) {
 //     100-rune 携带尾）+ 恰好 ≤maxChunkRunes 的单行 → 4101/4001 rune 块；
 //   - curLen 只计行内 rune、不计 join 换行：逐行代码块/近满 cur 追加围栏行
 //     实测冲到 4799 rune。
+//
 // 反证样本逐一覆盖，断言 rune 与字节双上限（字节对齐 Milvus VarChar）。
 func TestChunkMarkdownHardCapAllShapes(t *testing.T) {
 	cases := map[string]string{
