@@ -2,6 +2,54 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
+## [v0.11.8] — 2026-11-11
+
+### 修复(milvus,local)：存在路径形状校验 + 错误字段标准名（#97 #98）
+
+- #97 ensureCollection 的「已存在」路径补 DescribeCollection 形状校验：
+  向量维度与本仓配置一致、主键字段名/四字段形状兼容，漂移在构造期显式
+  报错——旧版本/外部工具建出的集合不再「构造期全绿、首次读写才在服务端
+  深处炸」；未加载（外部建而不 load / 手工 release）时补 LoadCollection，
+  与创建路径收尾加载同语义。dim 漂移带病运行的代价是写入期炸在
+  IndexQuiet 的 delete-已执行窗口（文件从检索面消失），必须拒绝
+- #98 重扫路径 3 处错误字段从手写 "error" 字面量改 logx.ErrKey（"err"）——
+  两矩阵落同一 Loki/ES，查询侧不再 OR 双写
+（#97 的运行时校验逻辑依赖真实 Milvus，单测覆盖不了 GetLoadState 分支；
+集成测试 milvus_integration_test.go 常规 CI 不跑。逻辑面以 sdk 类型编译期
+校验 + 既有单测回归。）
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.33.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.32.0` | `v0.33.0` |
+| `github.com/oekit/pkg` | `v0.42.0` | `v0.43.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+- 杂务(deps)：依赖地板追到最新——github.com/oekit/concurrency v0.32.0
+
+| 依赖 | 现地板 | 抬到 |
+|---|---|---|
+| `github.com/oekit/concurrency` | `v0.31.2` | `v0.32.0` |
+| `github.com/oekit/logx` | `v0.9.1` | `v0.9.2` |
+| `github.com/oekit/pkg` | `v0.41.1` | `v0.42.0` |
+## 为什么
+矩阵的**发版时刻地板时效**门禁（`verify_tag_floor --ref HEAD`）要求：各仓 HEAD
+（= 下次发版会发出去的内容）的依赖地板，相对那一刻的依赖最新版本，不能已落后。
+oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落后一格就会判红。
+## 兼容性实测
+本工具在提交前跑完 `go build` / `go vet` / `go test -race -count=1 ./...`（全绿才提交）
+与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
+只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
+
+
 ## [v0.11.7] — 2026-11-10
 
 ### 修复(chunking)：单块 ≤ maxChunkRunes 不变量在任何形态下成立（#85）
