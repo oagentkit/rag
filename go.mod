@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	github.com/cloudwego/eino v0.9.21
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
-	github.com/oagentkit/textx v0.10.7
+	github.com/oagentkit/textx v0.10.8
 	github.com/oekit/concurrency v0.33.0
 	github.com/oekit/logx v0.9.2
 	github.com/oekit/pkg v0.43.0
@@ -34,6 +34,7 @@ require (
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/milvus-io/milvus-proto/go-api/v2 v2.4.10-0.20240819025435-512e3b98866a // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
