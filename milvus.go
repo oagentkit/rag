@@ -100,7 +100,7 @@ func (s *MilvusStore) ensureCollection(ctx context.Context) error {
 		return fmt.Errorf("milvus: 检查集合失败: %w", err)
 	}
 	if has {
-		return nil
+		return s.verifyExistingCollection(ctx)
 	}
 
 	schema := entity.NewSchema().
@@ -132,6 +132,72 @@ func (s *MilvusStore) ensureCollection(ctx context.Context) error {
 		return fmt.Errorf("milvus: 加载集合失败: %w", err)
 	}
 
+	return nil
+}
+
+// verifyExistingCollection 存在路径的形状校验（oagentkit/rag#97）：集合由旧版本
+// /外部工具建出时「存在即返回」会让构造期全绿，首次读写才在 Milvus 服务端深处
+// 报错（rag#43 修「错误埋在服务端深处」只覆盖了创建路径）。三件事：
+//
+//  1. 向量字段维度与本仓配置一致（dim 漂移 = 写入/检索期必炸，且写入期炸点在
+//     IndexQuiet 的 delete-已执行窗口——文件从检索面消失）；
+//  2. 主键/字段形状与本仓 schema 兼容（字段名集合 + 主键字段名）——旧 id
+//     MaxLen=128 之类的形状漂移在此显式暴露而非写入期深报；
+//  3. 集合已加载——外部建而不 load / 手工 release 过的集合，Search 直接
+//     "collection not loaded"，未加载时补 LoadCollection（与创建路径同语义）。
+func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
+	col, err := s.client.DescribeCollection(ctx, s.cfg.Collection)
+	if err != nil {
+		return fmt.Errorf("milvus: 描述已有集合失败: %w", err)
+	}
+	var vec *entity.Field
+	var pk *entity.Field
+	names := make(map[string]bool, len(col.Schema.Fields))
+	for _, f := range col.Schema.Fields {
+		names[f.Name] = true
+		if f.Name == milvusVectorField {
+			vec = f
+		}
+		if f.PrimaryKey {
+			pk = f
+		}
+	}
+	if vec == nil {
+		return fmt.Errorf("milvus: 已有集合 %q 缺向量字段 %s（外部建的集合与本仓 schema 不兼容，换集合名或清理后重建）",
+			s.cfg.Collection, milvusVectorField)
+	}
+	if pk == nil || pk.Name != milvusIDField {
+		pkName := ""
+		if pk != nil {
+			pkName = pk.Name
+		}
+		return fmt.Errorf("milvus: 已有集合 %q 主键字段为 %q，本仓 schema 主键是 %q（外部建的集合与本仓 schema 不兼容，换集合名或清理后重建）",
+			s.cfg.Collection, pkName, milvusIDField)
+	}
+	for _, want := range []string{milvusContentField, milvusFileField, milvusHeadingField} {
+		if !names[want] {
+			return fmt.Errorf("milvus: 已有集合 %q 缺字段 %s（外部建的集合与本仓 schema 不兼容，换集合名或清理后重建）",
+				s.cfg.Collection, want)
+		}
+	}
+	if dimStr, ok := vec.TypeParams[entity.TypeParamDim]; ok {
+		var got int
+		if _, err := fmt.Sscanf(dimStr, "%d", &got); err == nil && got != s.cfg.Dimension {
+			return fmt.Errorf("milvus: 已有集合 %q 向量维度 %d 与配置维度 %d 不一致（dim 漂移会在写入期炸掉并触发 delete-已执行窗口，拒绝带病运行）",
+				s.cfg.Collection, got, s.cfg.Dimension)
+		}
+	}
+	// 未加载补 Load：外部建而不 load / 手工 release 过的集合，Search 直接
+	// "collection not loaded"——与创建路径的收尾加载同语义。
+	state, err := s.client.GetLoadState(ctx, s.cfg.Collection, nil)
+	if err != nil {
+		return fmt.Errorf("milvus: 查询已有集合加载态失败: %w", err)
+	}
+	if state != entity.LoadStateLoaded {
+		if err := s.client.LoadCollection(ctx, s.cfg.Collection, false); err != nil {
+			return fmt.Errorf("milvus: 已有集合未加载，补加载失败: %w", err)
+		}
+	}
 	return nil
 }
 

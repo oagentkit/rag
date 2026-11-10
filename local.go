@@ -175,7 +175,7 @@ func (l *Local) AsTool() tool.BaseTool {
 // 知识库"消失"且无任何信号。
 func (l *Local) Rescan() {
 	if _, err := os.Stat(l.dir); err != nil {
-		ragLog.Warn("agentkit.rag.rescan_root_missing", "dir", l.dir, "error", err.Error())
+		ragLog.Warn("agentkit.rag.rescan_root_missing", "dir", l.dir, logx.ErrKey, err.Error())
 		return
 	}
 	l.mu.Lock()
@@ -213,7 +213,7 @@ func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr
 			if walkErr == nil {
 				walkErr = err
 			}
-			ragLog.Warn("agentkit.rag.rescan_entry_error", "path", path, "error", err.Error())
+			ragLog.Warn("agentkit.rag.rescan_entry_error", "path", path, logx.ErrKey, err.Error())
 			return nil
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".md") {
@@ -224,7 +224,7 @@ func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr
 			// 单文件不可读跳过不阻塞整体索引，但**必须告警**（doc 承诺
 			// 「部分失败告警后照常换入」；此前静默跳过 = 该文档从索引消失
 			// 且无信号，排查方向带偏到检索面——rag#33）
-			ragLog.Warn("agentkit.rag.rescan_read_error", "path", path, "error", err.Error())
+			ragLog.Warn("agentkit.rag.rescan_read_error", "path", path, logx.ErrKey, err.Error())
 			return nil
 		}
 		rel, _ := filepath.Rel(l.dir, path)
