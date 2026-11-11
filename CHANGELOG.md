@@ -20,6 +20,8 @@ oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落�
 
 - 杂务(modernize)：sort.* → slices.*/min-max 内建——吃 Go 1.21+ 标准库，零行为变化
 
+- CI：go-version 1.24 → 1.26——go 指令已被依赖地板顶至 1.26.0（oekit/pkg v0.45.0 要求），薄调用层同步
+
 ## [v0.11.9] — 2026-11-11
 
 - 杂务(deps)：依赖地板追到最新——github.com/oagentkit/textx v0.10.9
