@@ -1,12 +1,13 @@
 package rag
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -149,7 +150,7 @@ func topKChunks(idx []indexedChunk, idf map[string]float64, qt []string, topK in
 			siftDown(heap, 0)
 		}
 	}
-	sort.Slice(heap, func(i, j int) bool { return heap[i].s > heap[j].s })
+	slices.SortFunc(heap, func(a, b scored) int { return cmp.Compare(b.s, a.s) })
 	out := make([]Chunk, 0, len(heap))
 	for _, h := range heap {
 		h.c.chunk.Score = h.s // 回填 TF-IDF 相关度（v0.14.3 修：此前恒 0，控制台/工具侧分值展示全空）
