@@ -6,10 +6,12 @@
 package rag
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/oekit/concurrency/async"
@@ -128,11 +130,11 @@ func FuseRRF(topK int, lists ...[]Chunk) []Chunk {
 	for k := range score {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if score[keys[i]] != score[keys[j]] {
-			return score[keys[i]] > score[keys[j]]
+	slices.SortFunc(keys, func(a, b string) int {
+		if c := cmp.Compare(score[b], score[a]); c != 0 {
+			return c
 		}
-		return keys[i] < keys[j]
+		return strings.Compare(a, b)
 	})
 	if topK < 0 {
 		topK = 0 // 导出纯函数不 panic（负数截断在 keys[:topK] 会越界，rag#30）
