@@ -519,7 +519,7 @@ func milvusHitChunks(res client.SearchResult) []Chunk {
 	}
 
 	scores := res.Scores
-	for i := 0; i < res.ResultCount; i++ {
+	for i := range res.ResultCount {
 		content := columnValueAt(contentCol, i)
 		file := columnValueAt(fileCol, i)
 		heading := columnValueAt(headingCol, i)
