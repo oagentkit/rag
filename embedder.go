@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oekit/pkg/httpjson"
@@ -41,12 +42,31 @@ type OpenAIEmbedder struct {
 	Model     string // 如 text-embedding-3-small / text-embedding-v3
 	dimension int    // 向量维度（需与模型输出一致）
 
-	client *http.Client
+	// clientMu 保护 client 的零值懒初始化（rag#122）：绕过构造器直接构造时
+	// client 为 nil，首次 Embed 需兜底——并发首调不 data race（AGENTS 并发纪律）。
+	clientMu sync.Mutex
+	client   *http.Client
 	// retryCfg 非 nil 时走 httpjson.DoJSONWithRetry 重试路径；nil = 单次尝试。
 	retryCfg *httpjson.RetryConfig
 	// batchSize 每批条数；<=0 时 Embed 内部回落 defaultEmbedBatchSize（兼容
 	// 绕过构造器直接构造的零值形态）。
 	batchSize int
+}
+
+// httpClient 返回生效 HTTP client。
+//
+// 构造器路径（NewOpenAIEmbedder）构造期已赋值，这里直接命中；**绕过构造器
+// 直接构造的零值形态**（batchSize 注释承诺兼容的那种）client 为 nil——首次
+// 调用兜底一个 defaultEmbedderTimeout 缺省 client（rag#122：此前直接进
+// httpjson.DoJSON 会在 client.Do 处 nil deref panic，「零值形态可用」的承诺
+// 只兑现了一半）。锁内懒初始化：并发首调不 data race。
+func (e *OpenAIEmbedder) httpClient() *http.Client {
+	e.clientMu.Lock()
+	defer e.clientMu.Unlock()
+	if e.client == nil {
+		e.client = &http.Client{Timeout: defaultEmbedderTimeout}
+	}
+	return e.client
 }
 
 // EmbedderOption OpenAIEmbedder 构造选项。
@@ -241,14 +261,15 @@ func (e *OpenAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]fl
 	}
 
 	var err error
+	client := e.httpClient() // 零值形态兜底（rag#122），构造器路径直接命中
 	if e.retryCfg != nil {
 		// 重试路径：每次尝试重新取 Request（body 已是 []byte，可重复读）。
-		err = httpjson.DoJSONWithRetry(ctx, e.client, func() (httpjson.Request, error) {
+		err = httpjson.DoJSONWithRetry(ctx, client, func() (httpjson.Request, error) {
 			return req, nil
 		}, *e.retryCfg, &er)
 	} else {
 		// 默认路径：单次尝试。
-		err = httpjson.DoJSON(ctx, e.client, req, &er)
+		err = httpjson.DoJSON(ctx, client, req, &er)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("embedding: %w", err)
