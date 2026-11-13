@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -140,9 +141,11 @@ func (s *MilvusStore) ensureCollection(ctx context.Context) error {
 // 报错（rag#43 修「错误埋在服务端深处」只覆盖了创建路径）。三件事：
 //
 //  1. 向量字段维度与本仓配置一致（dim 漂移 = 写入/检索期必炸，且写入期炸点在
-//     IndexQuiet 的 delete-已执行窗口——文件从检索面消失）；
-//  2. 主键/字段形状与本仓 schema 兼容（字段名集合 + 主键字段名）——旧 id
-//     MaxLen=128 之类的形状漂移在此显式暴露而非写入期深报；
+//     IndexQuiet 的 delete-已执行窗口——文件从检索面消失）；dim 参数缺失或
+//     不可解析时无法确认一致性，与漂移同档拒绝（#117 收口两条 fail-open 旁路）；
+//  2. 主键/字段形状与本仓 schema 兼容（字段名集合 + 主键字段名 + 主键
+//     max_length）——旧 id MaxLen=128 之类的形状漂移在此显式暴露而非写入期
+//     深报（#118 补 TypeParams 比对）；
 //  3. 集合已加载——外部建而不 load / 手工 release 过的集合，Search 直接
 //     "collection not loaded"，未加载时补 LoadCollection（与创建路径同语义）。
 func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
@@ -180,13 +183,46 @@ func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
 				s.cfg.Collection, want)
 		}
 	}
-	if dimStr, ok := vec.TypeParams[entity.TypeParamDim]; ok {
-		var got int
-		if _, err := fmt.Sscanf(dimStr, "%d", &got); err == nil && got != s.cfg.Dimension {
-			return fmt.Errorf("milvus: 已有集合 %q 向量维度 %d 与配置维度 %d 不一致（dim 漂移会在写入期炸掉并触发 delete-已执行窗口，拒绝带病运行）",
-				s.cfg.Collection, got, s.cfg.Dimension)
+	// dim 校验（#117 收口 fail-open）：缺 dim 参数与 dim 不可解析此前都让整块
+	// 跳过——#97 修的是「完全没有校验」，这两条旁路让「校验存在但对两类输入
+	// 不设防」。无法确认维度一致性 = 与漂移同档拒绝，不做放行。
+	dimStr, ok := vec.TypeParams[entity.TypeParamDim]
+	if !ok {
+		return fmt.Errorf("milvus: 已有集合 %q 向量字段 %s 缺 dim 参数，无法确认维度一致性（形状漂移拒绝带病运行，与维度不一致同档）",
+			s.cfg.Collection, milvusVectorField)
+	}
+	got, err := strconv.Atoi(dimStr)
+	if err != nil {
+		return fmt.Errorf("milvus: 已有集合 %q 向量字段 dim=%q 不可解析，无法确认维度一致性（形状漂移拒绝带病运行，与维度不一致同档）",
+			s.cfg.Collection, dimStr)
+	}
+	if got != s.cfg.Dimension {
+		return fmt.Errorf("milvus: 已有集合 %q 向量维度 %d 与配置维度 %d 不一致（dim 漂移会在写入期炸掉并触发 delete-已执行窗口，拒绝带病运行）",
+			s.cfg.Collection, got, s.cfg.Dimension)
+	}
+	// 主键 max_length 校验（#118：契约三件事之 2 承诺的形状漂移暴露）：
+	// 期望值取创建路径写入的同源常量 milvusIDMaxLen（避免两处字面量漂移）。
+	// 判据取「小于本仓上限」而非全等：写入侧由 milvusRowID 把 id 钉在
+	// milvusIDMaxLen 内，**更小**的 max_length（旧 Milvus 默认 128 之类）会让
+	// 本仓 id 被服务端拒绝——这才是「与本仓 schema 不兼容」；更大的值只是
+	// 余量富余（外部建集合常见 65535），不构成写入风险，全等判会把能正常
+	// 工作的集合误拦在构造期。
+	maxLenStr, hasMaxLen := pk.TypeParams[entity.TypeParamMaxLength]
+	if hasMaxLen {
+		maxLen, err := strconv.Atoi(maxLenStr)
+		if err != nil {
+			return fmt.Errorf("milvus: 已有集合 %q 主键 max_length=%q 不可解析，无法确认主键宽度（形状漂移拒绝带病运行）",
+				s.cfg.Collection, maxLenStr)
+		}
+		if maxLen < milvusIDMaxLen {
+			return fmt.Errorf("milvus: 已有集合 %q 主键 max_length=%d 小于本仓所需 %d（旧 id MaxLen 之类的形状漂移，长 id 会在写入期被服务端拒绝，拒绝带病运行）",
+				s.cfg.Collection, maxLen, milvusIDMaxLen)
 		}
 	}
+	// 缺 max_length 不拦：Milvus 对 VarChar 恒回填该参数（服务端缺省 65535 ≥
+	// milvusIDMaxLen，本仓 id 又被 milvusRowID 钉在 milvusIDMaxLen 内，写入
+	// 安全），缺失按服务端缺省判定为兼容——见 #118 的判据方向说明。
+
 	// 未加载补 Load：外部建而不 load / 手工 release 过的集合，Search 直接
 	// "collection not loaded"——与创建路径的收尾加载同语义。
 	state, err := s.client.GetLoadState(ctx, s.cfg.Collection, nil)
