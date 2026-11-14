@@ -6,9 +6,9 @@ require (
 	github.com/cloudwego/eino v0.9.21
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/oagentkit/textx v0.12.0
-	github.com/oekit/concurrency v0.36.1
+	github.com/oekit/concurrency v0.37.0
 	github.com/oekit/logx v0.11.0
-	github.com/oekit/pkg v0.48.0
+	github.com/oekit/pkg v0.50.0
 )
 
 require (
