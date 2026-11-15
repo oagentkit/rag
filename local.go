@@ -47,7 +47,12 @@ type Local struct {
 	index     []indexedChunk
 	idf       map[string]float64 // token → smoothed IDF（rescan 预计算，检索时零 log）
 	scannedAt time.Time
-	scanning  bool // 重扫进行中（并发过期触发的重扫收敛为单份）
+	// retryAt 失败退避截止时间（oagentkit/rag#135）：Rescan 失败（根不可达/
+	// 全量读失败/ctx 中止）后置为 now+rescanInterval，期间自动过期判定不再
+	// 重试——此前失败路径不写 scannedAt，持续故障下每次检索都重跑失败扫描、
+	// 告警频率等于检索频率。成功换入清零；显式 Rescan() 不受退避约束。
+	retryAt  time.Time
+	scanning bool // 重扫进行中（并发过期触发的重扫收敛为单份）
 }
 
 // NewLocal 构造并立即扫描。dir 不存在时返回错误。
@@ -65,18 +70,27 @@ func NewLocal(dir string) (*Local, error) {
 }
 
 // Retrieve 检索 topK 片段。
+// ctx 取消/超时在三个检查点生效（oagentkit/rag#133：此前注释自称"无阻塞点"
+// 却同步全目录 Rescan，取消承诺落空）：入口、重扫触发点（目录遍历的条目间
+// 检查）、打分遍历。中止时保留旧索引并返回 ctx.Err()。
 // 重扫在锁外进行（构建新索引后原子换入）——并发检索不被文件 I/O 阻塞；
 // 多 goroutine 同时判过期时重扫收敛为单份（scanning 标志让位，换入后对
 // 所有人可见；此前并发各扫一遍，大目录下内存峰值按并发数放大）。
 func (l *Local) Retrieve(ctx context.Context, query string, topK int, filter Filter) ([]Chunk, error) {
-	_ = ctx // 当前实现无阻塞点，保留 ctx 以面向未来（接口契约）
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := validateFilter(filter); err != nil {
 		return nil, err
 	}
 	l.mu.Lock()
-	if time.Since(l.scannedAt) >= rescanInterval {
+	if l.rescanDueLocked() {
 		l.mu.Unlock()
-		l.Rescan()
+		l.rescan(ctx)
+		// 重扫因取消/超时中止：不再用旧索引继续打分，把取消信号交还调用方。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		l.mu.Lock()
 	}
 	idx, idf := l.index, l.idf
@@ -89,7 +103,16 @@ func (l *Local) Retrieve(ctx context.Context, query string, topK int, filter Fil
 	if len(qt) == 0 || len(idx) == 0 {
 		return nil, nil
 	}
-	return topKChunks(idx, idf, qt, topK, filter), nil
+	return topKChunks(ctx, idx, idf, qt, topK, filter)
+}
+
+// rescanDueLocked 自动过期判定（调用方须持 l.mu）：距上次成功扫描 ≥
+// rescanInterval，且不在失败退避窗口内。
+func (l *Local) rescanDueLocked() bool {
+	if time.Since(l.scannedAt) < rescanInterval {
+		return false
+	}
+	return l.retryAt.IsZero() || !time.Now().Before(l.retryAt)
 }
 
 // scored 堆元素（检索路径局部类型，不外泄）。
@@ -132,9 +155,19 @@ func siftUp(heap []scored, i int) {
 
 // topKChunks 固定容量小顶堆选 topK：堆顶是当前第 K 大，全程 O(chunks·log K)，
 // 替代"全量收集 + 全排序"（大 hits 切片分配是检索路径内存开销的大头）。
-func topKChunks(idx []indexedChunk, idf map[string]float64, qt []string, topK int, filter Filter) []Chunk {
+// ctx 每 256 个块检查一次（oagentkit/rag#133）：全索引遍历对大目录同样是
+// 可感知的阻塞段，取消/超时要在打分面生效。
+func topKChunks(ctx context.Context, idx []indexedChunk, idf map[string]float64, qt []string, topK int, filter Filter) ([]Chunk, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	heap := make([]scored, 0, topK)
-	for _, ic := range idx {
+	for i, ic := range idx {
+		if i&0xff == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if !matchFilter(ic.chunk.Metadata, filter) {
 			continue
 		}
@@ -156,7 +189,7 @@ func topKChunks(idx []indexedChunk, idf map[string]float64, qt []string, topK in
 		h.c.chunk.Score = h.s // 回填 TF-IDF 相关度（v0.14.3 修：此前恒 0，控制台/工具侧分值展示全空）
 		out = append(out, h.c.chunk)
 	}
-	return out
+	return out, nil
 }
 
 // AsTool 把检索包成 search_knowledge 工具。
@@ -171,11 +204,16 @@ func (l *Local) AsTool() tool.BaseTool {
 	return t
 }
 
-// Rescan 强制重新扫描知识库目录（不等待自动过期）。
+// Rescan 强制重新扫描知识库目录（不等待自动过期，也不受失败退避约束）。
 // 根目录不可达（卷卸载/被删）时保留旧索引并告警——静默换入空索引会让
 // 知识库"消失"且无任何信号。
-func (l *Local) Rescan() {
+func (l *Local) Rescan() { l.rescan(context.Background()) }
+
+// rescan 单次全量扫描。自动过期路径携带调用方 ctx（可取消）；显式 Rescan
+// 走 Background——「强制」语义不因退避/取消跳过。
+func (l *Local) rescan(ctx context.Context) {
 	if _, err := os.Stat(l.dir); err != nil {
+		l.markScanFailure()
 		ragLog.Warn("agentkit.rag.rescan_root_missing", "dir", l.dir, logx.ErrKey, err.Error())
 		return
 	}
@@ -188,31 +226,78 @@ func (l *Local) Rescan() {
 	}
 	l.scanning = true
 	l.mu.Unlock()
-	index, df, walkErr := l.scanMarkdown()
-	idf := computeIDF(len(index), df)
+
+	out := l.scanMarkdown(ctx)
+	if ctx.Err() != nil {
+		// 取消落在遍历收尾之后：仍然不得换入（结果虽完整，语义上已超时）。
+		out.aborted = true
+	}
+
 	// 原子换入：检索侧要么看到完整旧索引、要么完整新索引，不见中间态。
-	// 全量读失败（walkErr 非空且一无所获）时保留旧索引——区分"用户清空目录"
-	// （WalkDir 无 err，正常换入空索引）与"读失败"（保留旧索引）。
 	l.mu.Lock()
 	l.scanning = false
-	if walkErr != nil && len(index) == 0 {
+	switch {
+	case out.aborted:
+		// ctx 取消/超时：结果不完整，保留旧索引；同样进入退避，避免上层
+		// 每次超时都重跑一轮注定被打断的全目录 I/O。
+		l.retryAt = time.Now().Add(rescanInterval)
 		l.mu.Unlock()
-		return
+	case len(out.index) == 0 && (out.walkErr != nil || (out.readFailed > 0 && out.readOK == 0)):
+		// 全量失败时保留旧索引——区分"用户清空目录"（WalkDir 无 err、无读
+		// 失败，正常换入空索引）与"读失败"（保留旧索引）。oagentkit/rag#131：
+		// 此前只认 walkErr，目录可 readdir 但全部 .md ReadFile 失败（fd 耗尽/
+		// 批量权限拒绝/FUSE 半故障）时被当成用户清空，空索引照常换入，知识库
+		// 静默清空；总失败的处置反而比部分失败更差。
+		l.retryAt = time.Now().Add(rescanInterval)
+		l.mu.Unlock()
+		if out.readFailed > 0 && out.readErr != nil {
+			ragLog.Warn("agentkit.rag.rescan_all_read_failed",
+				"dir", l.dir, "files", out.readFailed, logx.ErrKey, out.readErr.Error())
+		}
+	default:
+		// 部分失败（部分文件不可读/部分子树遍历失败）告警后照常换入。
+		l.index, l.idf, l.scannedAt = out.index, computeIDF(len(out.index), out.df), time.Now()
+		l.retryAt = time.Time{}
+		l.mu.Unlock()
 	}
-	l.index, l.idf, l.scannedAt = index, idf, time.Now()
+}
+
+// markScanFailure 记录失败退避（oagentkit/rag#135）：持续故障期间自动过期
+// 判定按 rescanInterval 重试，告警频率不再等于检索频率。
+func (l *Local) markScanFailure() {
+	l.mu.Lock()
+	l.retryAt = time.Now().Add(rescanInterval)
 	l.mu.Unlock()
+}
+
+// scanOutcome 一次全量扫描的结果。空索引有三种成因，处置不同（rag#131/#135）：
+// 用户清空目录（无错误，正常换入空索引）、遍历/读取错误（保留旧索引并退避）、
+// ctx 取消（结果不完整，同样保留旧索引）。
+type scanOutcome struct {
+	index      []indexedChunk
+	df         map[string]int
+	walkErr    error // 首个 WalkDir 自身错误（不含 ctx 取消）
+	readFailed int   // ReadFile 失败文件数
+	readOK     int   // ReadFile 成功文件数（区分"全部读失败"与"读到空文件"）
+	readErr    error // 首个 ReadFile 错误（聚合告警用）
+	aborted    bool  // ctx 取消/超时中止
 }
 
 // scanMarkdown 遍历目录构建分块索引与文档频率表。
 // WalkDir 对"已处理的错误"返回 nil 即跳过继续——但根目录 stat 通过而不可 readdir
 // （权限收紧/挂载半故障）时整棵树读不到，静默换入空索引 = 知识库"消失"且无信号。
 // 记录读取错误：全部读失败时保留旧索引（与根目录缺失同策略），部分失败告警后照常换入。
-func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr error) {
-	df = map[string]int{}
+// ctx 在条目间检查（oagentkit/rag#133）：取消/超时中止遍历并置 aborted，结果不换入。
+func (l *Local) scanMarkdown(ctx context.Context) scanOutcome {
+	out := scanOutcome{df: map[string]int{}}
 	_ = filepath.WalkDir(l.dir, func(path string, d os.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			out.aborted = true
+			return cerr
+		}
 		if err != nil {
-			if walkErr == nil {
-				walkErr = err
+			if out.walkErr == nil {
+				out.walkErr = err
 			}
 			ragLog.Warn("agentkit.rag.rescan_entry_error", "path", path, logx.ErrKey, err.Error())
 			return nil
@@ -222,17 +307,26 @@ func (l *Local) scanMarkdown() (index []indexedChunk, df map[string]int, walkErr
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				out.aborted = true
+				return cerr
+			}
 			// 单文件不可读跳过不阻塞整体索引，但**必须告警**（doc 承诺
 			// 「部分失败告警后照常换入」；此前静默跳过 = 该文档从索引消失
 			// 且无信号，排查方向带偏到检索面——rag#33）
+			out.readFailed++
+			if out.readErr == nil {
+				out.readErr = err
+			}
 			ragLog.Warn("agentkit.rag.rescan_read_error", "path", path, logx.ErrKey, err.Error())
 			return nil
 		}
+		out.readOK++
 		rel, _ := filepath.Rel(l.dir, path)
-		indexMarkdownFile(rel, string(data), &index, df)
+		indexMarkdownFile(rel, string(data), &out.index, out.df)
 		return nil
 	})
-	return index, df, walkErr
+	return out
 }
 
 // indexMarkdownFile 单文件分块入索引并累计文档频率。
@@ -300,6 +394,11 @@ type mdChunker struct {
 	cur         []string
 	curLen      int
 	inCodeBlock bool
+	// fenceLen 当前开围栏的反引号长度（inCodeBlock 为 true 时有效）。闭合
+	// 要求反引号数 ≥ 该值（CommonMark；oagentkit/rag#132：此前任何 ``` 开头
+	// 的行都无条件翻转，4 反引号包裹的 ``` 示例把配对错位，示例内的 # 注释
+	// 被当标题切块）。
+	fenceLen int
 	// curIsCarry cur 仅含上次切块携带的重叠尾（此后未追加任何新内容）。
 	// 此状态下再遇块边界（标题/超长行/闭合围栏）不得把尾巴独立成块——
 	// 母块已逐字持有该文本，独立块是纯重复的「幻影块」（rag#41）。
@@ -360,19 +459,19 @@ func (z *mdChunker) handleLine(line string, more bool) {
 	// 只在正文路径——代码块内单条超长行直接越过 Milvus VarChar 65535 字节
 	// 上限，flush 出的单块让整个文件（含正常段落）Insert 失败（第六轮审计
 	// C 级）。围栏行同样受守卫（issue#85）：豁免曾让 "```+粘贴内容" 整行
-	// 进块（实测 70003 字节单块），硬切时状态机按整行翻转一次不破坏配对。
+	// 进块（实测 70003 字节单块），硬切时状态机按围栏动作更新一次不破坏配对。
 	if utf8.RuneCountInString(line) > maxChunkRunes {
-		if isFenceLine(line) {
-			z.handleOverlongFenceLine(line)
+		if kind := z.fenceKindOf(line); kind != fenceNone {
+			z.handleOverlongFenceLine(line, kind)
 		} else {
 			z.handleOverlongLine(line)
 		}
 		return
 	}
-	if isFenceLine(line) {
-		wasInCode := z.inCodeBlock
-		z.inCodeBlock = !z.inCodeBlock
-		if wasInCode && len(z.cur) == 0 {
+	if kind := z.fenceKindOf(line); kind != fenceNone {
+		n, _, _ := fenceRun(line)
+		z.applyFence(kind, n)
+		if kind == fenceClose && len(z.cur) == 0 {
 			// 闭合围栏落在空 cur（代码块内 maxChunkRunes 强制 flush 刚切开）：
 			// 收留它只会让紧随的块边界旋出一个 content 仅为 "```" 的垃圾块
 			// （rag#41 同根因副产物）——围栏行无检索价值，丢弃。
@@ -439,9 +538,55 @@ func (z *mdChunker) flushBeforeHardSplit() {
 	}
 }
 
-// isFenceLine 代码围栏行（``` 开头，可带语言标注）。
-func isFenceLine(line string) bool {
-	return strings.HasPrefix(strings.TrimSpace(line), "```")
+// fenceKind 围栏行对状态机的作用。
+type fenceKind int
+
+const (
+	fenceNone fenceKind = iota
+	fenceOpen
+	fenceClose
+)
+
+// fenceRun 解析围栏行：前导空白 + 连续反引号（≥3）+ 围栏后剩余内容。
+// 前导空白容忍（与既有 TrimSpace 行为一致），返回反引号个数与剩余内容。
+func fenceRun(line string) (n int, rest string, ok bool) {
+	t := strings.TrimLeft(line, " \t")
+	i := 0
+	for i < len(t) && t[i] == '`' {
+		i++
+	}
+	if i < 3 {
+		return 0, "", false
+	}
+	return i, t[i:], true
+}
+
+// fenceKindOf 当前行对状态机的作用（oagentkit/rag#132）：闭合须同时满足
+// 「反引号数 ≥ 开围栏长度」与「围栏后无信息串」（CommonMark 闭合围栏只允许
+// 尾随空白）——4 反引号块里的 ```/```go 是内容而非闭合，不再错位翻转。
+func (z *mdChunker) fenceKindOf(line string) fenceKind {
+	n, rest, ok := fenceRun(line)
+	if !ok {
+		return fenceNone
+	}
+	if !z.inCodeBlock {
+		return fenceOpen
+	}
+	if n >= z.fenceLen && strings.TrimSpace(rest) == "" {
+		return fenceClose
+	}
+	return fenceNone
+}
+
+// applyFence 按动作更新围栏状态：开围栏记录长度，闭围栏清零。
+func (z *mdChunker) applyFence(kind fenceKind, n int) {
+	if kind == fenceOpen {
+		z.inCodeBlock = true
+		z.fenceLen = n
+		return
+	}
+	z.inCodeBlock = false
+	z.fenceLen = 0
 }
 
 // handleOverlongLine 超长行硬切（单一入口）：先收当前块，再按 maxChunkRunes
@@ -456,12 +601,13 @@ func (z *mdChunker) handleOverlongLine(line string) {
 
 // handleOverlongFenceLine 超长围栏行硬切（issue#85）：围栏行曾豁免单行守卫，
 // "``` + 粘贴内容" 整行 appendLine 进块，单块可达任意长度（实测 70003 字节，
-// 越过 Milvus VarChar 65535 上限，整文件 Upsert 被拒）。开/闭状态机按整行
-// 翻转一次（配对不破坏），行内容随后走 handleOverlongLine 同一硬切入口
-// （SplitRunes 保序等分，每块确定性 ≤ maxChunkRunes）；超长围栏行携带的
-// 大块内容有检索价值，不适用短围栏「空 cur 丢弃」规则。
-func (z *mdChunker) handleOverlongFenceLine(line string) {
-	z.inCodeBlock = !z.inCodeBlock
+// 越过 Milvus VarChar 65535 上限，整文件 Upsert 被拒）。开/闭状态机按围栏
+// 动作更新一次（按反引号长度配对，rag#132），行内容随后走 handleOverlongLine
+// 同一硬切入口（SplitRunes 保序等分，每块确定性 ≤ maxChunkRunes）；超长围栏
+// 行携带的大块内容有检索价值，不适用短围栏「空 cur 丢弃」规则。
+func (z *mdChunker) handleOverlongFenceLine(line string, kind fenceKind) {
+	n, _, _ := fenceRun(line)
+	z.applyFence(kind, n)
 	z.handleOverlongLine(line)
 }
 

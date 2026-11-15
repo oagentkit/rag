@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,11 +10,14 @@ import (
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
 
-// fakeVerifyClient 只实现 verifyExistingCollection 用到的两个面：
-// DescribeCollection（形状）与 GetLoadState（加载态，返回 Loaded 免补加载）。
+// fakeVerifyClient 实现 verifyExistingCollection 用到的面：
+// DescribeCollection（形状）、GetLoadState（加载态，返回 Loaded 免补加载）
+// 与 DescribeIndex（索引面，#134）。
 type fakeVerifyClient struct {
 	client.Client
-	col *entity.Collection
+	col      *entity.Collection
+	indexes  []entity.Index
+	indexErr error
 }
 
 func (f *fakeVerifyClient) DescribeCollection(_ context.Context, _ string) (*entity.Collection, error) {
@@ -24,8 +28,19 @@ func (f *fakeVerifyClient) GetLoadState(_ context.Context, _ string, _ []string)
 	return entity.LoadStateLoaded, nil
 }
 
+func (f *fakeVerifyClient) DescribeIndex(_ context.Context, _ string, _ string, _ ...client.IndexOption) ([]entity.Index, error) {
+	return f.indexes, f.indexErr
+}
+
+// goodVectorIndex 创建路径同款索引：IVF_FLAT + COSINE。
+func goodVectorIndex() entity.Index {
+	return entity.NewGenericIndex("vec_idx", entity.IvfFlat, map[string]string{
+		milvusMetricTypeParam: string(entity.COSINE),
+	})
+}
+
 // verifyStore 以「创建路径同款 schema」为基线构造存在路径校验的 store：
-// id 主键 max_length=milvusIDMaxLen、embedding dim=1024。
+// id 主键 max_length=milvusIDMaxLen、embedding dim=1024、IVF_FLAT/COSINE 索引。
 func verifyStore(t *testing.T, mutate func(schema *entity.Schema)) *MilvusStore {
 	t.Helper()
 	schema := entity.NewSchema().
@@ -39,9 +54,17 @@ func verifyStore(t *testing.T, mutate func(schema *entity.Schema)) *MilvusStore 
 		mutate(schema)
 	}
 	return &MilvusStore{
-		cfg:    MilvusConfig{Collection: "c", Dimension: 1024},
-		client: &fakeVerifyClient{col: &entity.Collection{Schema: schema}},
+		cfg:    MilvusConfig{Collection: "c", Dimension: 1024, MetricType: entity.COSINE},
+		client: &fakeVerifyClient{col: &entity.Collection{Schema: schema}, indexes: []entity.Index{goodVectorIndex()}},
 	}
+}
+
+// verifyStoreWithIndexes 基线 store + 指定索引面。
+func verifyStoreWithIndexes(t *testing.T, indexes ...entity.Index) *MilvusStore {
+	t.Helper()
+	s := verifyStore(t, nil)
+	s.client.(*fakeVerifyClient).indexes = indexes
+	return s
 }
 
 // 字段定位辅助：按名改 TypeParams。
@@ -134,4 +157,66 @@ func TestVerifyExistingCollectionAcceptsWiderOrMissingIDMaxLength(t *testing.T) 
 			t.Fatalf("缺 max_length 按服务端缺省判定应放行: %v", err)
 		}
 	})
+}
+
+// #134：外部建的 HNSW 索引集合构造期必须拒绝——searchChunks 固定发 IVF_FLAT
+// 的 nprobe 参数，索引类型不匹配会在首次 Search 于服务端深处报错。
+func TestVerifyExistingCollectionRejectsNonIVFFlatIndex(t *testing.T) {
+	hnsw := entity.NewGenericIndex("hnsw_idx", entity.HNSW, map[string]string{
+		milvusMetricTypeParam: string(entity.COSINE),
+	})
+	err := verifyStoreWithIndexes(t, hnsw).verifyExistingCollection(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HNSW") || !strings.Contains(err.Error(), "IVF_FLAT") {
+		t.Fatalf("HNSW 索引应拒绝并点名类型差异: %v", err)
+	}
+}
+
+// #134：索引 metric 与配置不一致（L2 vs 缺省 COSINE）必须拒绝——Search 携带
+// cfg.MetricType，与索引度量不匹配同样在服务端深处报错。
+func TestVerifyExistingCollectionRejectsMetricMismatch(t *testing.T) {
+	l2 := entity.NewGenericIndex("vec_idx", entity.IvfFlat, map[string]string{
+		milvusMetricTypeParam: string(entity.L2),
+	})
+	err := verifyStoreWithIndexes(t, l2).verifyExistingCollection(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "L2") || !strings.Contains(err.Error(), "COSINE") {
+		t.Fatalf("L2 索引与 COSINE 配置应拒绝并点名度量差异: %v", err)
+	}
+}
+
+// #134：有 schema 无索引的集合构造期必须拒绝（DescribeCollection 看不到）。
+func TestVerifyExistingCollectionRejectsMissingIndex(t *testing.T) {
+	err := verifyStoreWithIndexes(t).verifyExistingCollection(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "无索引") {
+		t.Fatalf("无索引应拒绝: %v", err)
+	}
+}
+
+// #134：索引缺 metric_type 参数 = 无法确认度量一致性，与漂移同档拒绝（对齐
+// dim 的 fail-closed 判据）。
+func TestVerifyExistingCollectionRejectsMissingMetricParam(t *testing.T) {
+	noMetric := entity.NewGenericIndex("vec_idx", entity.IvfFlat, map[string]string{})
+	err := verifyStoreWithIndexes(t, noMetric).verifyExistingCollection(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "metric_type") {
+		t.Fatalf("缺 metric_type 应拒绝: %v", err)
+	}
+}
+
+// #134：DescribeIndex 自身失败必须上抛（构造期不能带病放行）。
+func TestVerifyExistingCollectionPropagatesIndexError(t *testing.T) {
+	s := verifyStore(t, nil)
+	s.client.(*fakeVerifyClient).indexErr = errors.New("index rpc down")
+	err := s.verifyExistingCollection(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "索引") || !strings.Contains(err.Error(), "index rpc down") {
+		t.Fatalf("DescribeIndex 失败应上抛: %v", err)
+	}
+}
+
+// #134 对照组：metric 大小写不敏感（Milvus 度量名大小写不敏感），不应误拦。
+func TestVerifyExistingCollectionAcceptsMetricCaseInsensitive(t *testing.T) {
+	lower := entity.NewGenericIndex("vec_idx", entity.IvfFlat, map[string]string{
+		milvusMetricTypeParam: "cosine",
+	})
+	if err := verifyStoreWithIndexes(t, lower).verifyExistingCollection(context.Background()); err != nil {
+		t.Fatalf("metric 大小写不同应按一致放行: %v", err)
+	}
 }

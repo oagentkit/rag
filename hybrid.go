@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -28,9 +29,33 @@ type Hybrid struct {
 	keyword *Local
 }
 
-// NewHybrid 构造混合检索器。
-func NewHybrid(vector KnowledgeService, keyword *Local) *Hybrid {
-	return &Hybrid{vector: vector, keyword: keyword}
+// NewHybrid 构造混合检索器。任一检索路为 nil 返回 error（oagentkit/rag#136）：
+// 此前构造期零校验，nil 路在每次 Retrieve 的 lane goroutine 内 panic——被
+// FanInErr recover 成 PanicError 并全局上报，单路有结果时还被降级分支吞掉，
+// 装配错误被伪装成运行时 bug 信号。对齐 NewMilvusStore（rag#34）的构造期
+// fail-fast；vector 的 typed-nil（如 (*MilvusStore)(nil) 装入接口）同样拒绝。
+func NewHybrid(vector KnowledgeService, keyword *Local) (*Hybrid, error) {
+	if isNilKnowledgeService(vector) {
+		return nil, errors.New("hybrid: vector 检索路不能为空")
+	}
+	if keyword == nil {
+		return nil, errors.New("hybrid: keyword 检索路不能为空")
+	}
+	return &Hybrid{vector: vector, keyword: keyword}, nil
+}
+
+// isNilKnowledgeService 判空含 typed-nil：接口值非 nil 但底层指针为 nil 时
+// 方法调用同样 panic，构造期 fail-fast 要覆盖这一形态。
+func isNilKnowledgeService(svc KnowledgeService) bool {
+	if svc == nil {
+		return true
+	}
+	v := reflect.ValueOf(svc)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Retrieve 双路并行检索 → RRF 融合 → topK。两路各取 topK*2 候选（融合后截断，

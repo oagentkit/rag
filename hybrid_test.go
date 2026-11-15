@@ -37,6 +37,37 @@ func (panicKS) Retrieve(context.Context, string, int, Filter) ([]Chunk, error) {
 }
 func (panicKS) AsTool() tool.BaseTool { return nil }
 
+// mustNewHybrid 测试构造 helper：合法装配不应回错。
+func mustNewHybrid(t *testing.T, vector KnowledgeService, keyword *Local) *Hybrid {
+	t.Helper()
+	h, err := NewHybrid(vector, keyword)
+	if err != nil {
+		t.Fatalf("NewHybrid: %v", err)
+	}
+	return h
+}
+
+// TestNewHybridRejectsNil 回归（oagentkit/rag#136）：nil 检索路构造期
+// fail-fast，不得等到每次 Retrieve 在 lane goroutine 里 panic（被 FanInErr
+// recover 成 PanicError 全局上报，单路有结果时还被降级分支吞掉）。
+// typed-nil（接口非 nil、底层指针 nil）同样拒绝。
+func TestNewHybridRejectsNil(t *testing.T) {
+	if _, err := NewHybrid(nil, fakeLocal(t)); err == nil {
+		t.Fatal("nil vector 应构造期报错")
+	}
+	if _, err := NewHybrid(&fakeKS{}, nil); err == nil {
+		t.Fatal("nil keyword 应构造期报错")
+	}
+	var typedNil *fakeKS
+	if _, err := NewHybrid(typedNil, fakeLocal(t)); err == nil {
+		t.Fatal("typed-nil vector 应构造期报错")
+	}
+	h, err := NewHybrid(&fakeKS{}, fakeLocal(t))
+	if err != nil || h == nil {
+		t.Fatalf("合法装配应成功: h=%v err=%v", h, err)
+	}
+}
+
 func chunk(id, content string) Chunk { return Chunk{ID: id, Content: content} }
 
 func TestFuseRRFConsensusBoost(t *testing.T) {
@@ -138,13 +169,13 @@ func fakeLocalErr(t *testing.T) *Local {
 
 func TestHybridDegradation(t *testing.T) {
 	// 语义路失败 → 降级词料路（查询须命中词料内容——TF-IDF 无匹配返回空属正常检索结果）
-	h := NewHybrid(&fakeKS{err: errors.New("milvus down")}, fakeLocal(t))
+	h := mustNewHybrid(t, &fakeKS{err: errors.New("milvus down")}, fakeLocal(t))
 	got, err := h.Retrieve(context.Background(), "kubernetes", 3, nil)
 	if err != nil || len(got) == 0 {
 		t.Fatalf("单路失败应降级: %v %+v", err, got)
 	}
 	// 词料路失败 → 降级语义路
-	h2 := NewHybrid(&fakeKS{chunks: []Chunk{chunk("v1", "向量结果")}}, fakeLocalErr(t))
+	h2 := mustNewHybrid(t, &fakeKS{chunks: []Chunk{chunk("v1", "向量结果")}}, fakeLocalErr(t))
 	got2, err := h2.Retrieve(context.Background(), "q", 3, nil)
 	if err != nil || len(got2) == 0 {
 		t.Fatalf("另一向失败应降级: %v %+v", err, got2)
@@ -152,12 +183,12 @@ func TestHybridDegradation(t *testing.T) {
 	// 双路全败 → 回 first error。词料路真失败借 Local 唯一错误缝注入（过滤
 	// 白名单校验报错；fakeLocalErr 是健康但空索引的 Local，属合法空命中而非
 	// 失败——rag#76 起不再与失败合流）；fakeKS 忽略 filter、按 err 桩失败。
-	h3 := NewHybrid(&fakeKS{err: errors.New("a")}, fakeLocalErr(t))
+	h3 := mustNewHybrid(t, &fakeKS{err: errors.New("a")}, fakeLocalErr(t))
 	if _, err := h3.Retrieve(context.Background(), "q", 3, Filter{"no_such_field": "x"}); err == nil {
 		t.Fatal("双路全败应回错")
 	}
 	// topK 截断
-	h4 := NewHybrid(&fakeKS{chunks: []Chunk{chunk("1", "a"), chunk("2", "b"), chunk("3", "c")}}, fakeLocal(t))
+	h4 := mustNewHybrid(t, &fakeKS{chunks: []Chunk{chunk("1", "a"), chunk("2", "b"), chunk("3", "c")}}, fakeLocal(t))
 	got4, err := h4.Retrieve(context.Background(), "q", 1, nil)
 	if err != nil || len(got4) != 1 {
 		t.Fatalf("topK 截断不符: %v %+v", err, got4)
@@ -165,7 +196,7 @@ func TestHybridDegradation(t *testing.T) {
 }
 
 func TestHybridAsToolDelegates(t *testing.T) {
-	h := NewHybrid(&fakeKS{}, fakeLocal(t))
+	h := mustNewHybrid(t, &fakeKS{}, fakeLocal(t))
 	if h.AsTool() != nil {
 		t.Fatal("应透传语义路 AsTool（fake 返回 nil）")
 	}
@@ -179,7 +210,7 @@ func TestHybridAsToolDelegates(t *testing.T) {
 // panic 不在豁免面（自家 bug 不掩盖，见 TestHybridLanePanicDegrades）。
 func TestHybridLaneFailSurvivorEmptyHit(t *testing.T) {
 	// 向量路端点抖动 + 词料路健康但查询无词汇重叠 → 合法空命中
-	h := NewHybrid(&fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
+	h := mustNewHybrid(t, &fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
 	got, err := h.Retrieve(context.Background(), "zzz-no-such-term-qqq", 3, nil)
 	if err != nil {
 		t.Fatalf("幸存路合法空命中不应回错（rag#76）: %v", err)
@@ -188,7 +219,7 @@ func TestHybridLaneFailSurvivorEmptyHit(t *testing.T) {
 		t.Fatalf("空命中应返回空结果: %+v", got)
 	}
 	// 幸存路非空时照常融合返回（降级契约不变，失败路丢弃）
-	h2 := NewHybrid(&fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
+	h2 := mustNewHybrid(t, &fakeKS{err: errors.New("vector lane down")}, fakeLocal(t))
 	got2, err := h2.Retrieve(context.Background(), "kubernetes", 3, nil)
 	if err != nil || len(got2) == 0 {
 		t.Fatalf("单路失败降级另一路应正常返回: %v %+v", err, got2)
@@ -197,7 +228,7 @@ func TestHybridLaneFailSurvivorEmptyHit(t *testing.T) {
 
 func TestHybridLanePanicDegrades(t *testing.T) {
 	// 语义路 panic → FanInErr Slot.Err 携带 *async.PanicError 记为该路失败，降级词料路（恐慌不出宿主进程）
-	h := NewHybrid(panicKS{}, fakeLocal(t))
+	h := mustNewHybrid(t, panicKS{}, fakeLocal(t))
 	got, err := h.Retrieve(context.Background(), "kubernetes", 3, nil)
 	if err != nil || len(got) == 0 {
 		t.Fatalf("恐慌路应降级另一路: %v %+v", err, got)
@@ -215,7 +246,7 @@ func TestHybridLanePanicDegrades(t *testing.T) {
 // 降级机制接不住）。
 func TestHybridRetrieveTopKNormalized(t *testing.T) {
 	newHyb := func(t *testing.T) *Hybrid {
-		return NewHybrid(&fakeKS{chunks: []Chunk{chunk("v1", "alpha"), chunk("v2", "beta")}}, fakeLocal(t))
+		return mustNewHybrid(t, &fakeKS{chunks: []Chunk{chunk("v1", "alpha"), chunk("v2", "beta")}}, fakeLocal(t))
 	}
 	for _, topK := range []int{0, -1, -100} {
 		h := newHyb(t)

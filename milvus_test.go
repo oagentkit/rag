@@ -2,7 +2,9 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -361,5 +363,116 @@ func TestCrossLaneChunkIDAgreeOnStoredIdentity(t *testing.T) {
 	indexMarkdownFile("doc.md", "# 乙\n\n正文。\n", &idx2, df)
 	if idx2[0].chunk.ID != "doc.md#chunk_0" {
 		t.Fatalf("限内路径 Local ID 形态不应变化: %q", idx2[0].chunk.ID)
+	}
+}
+
+// fakeRowIterator 对账游标桩（oagentkit/rag#137）：按批次吐 ResultSet，
+// 耗尽返回 io.EOF（与 client.QueryIterator 契约一致）。
+type fakeRowIterator struct {
+	batches []client.ResultSet
+	err     error
+	i       int
+}
+
+func (f *fakeRowIterator) Next(_ context.Context) (client.ResultSet, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.i >= len(f.batches) {
+		return nil, io.EOF
+	}
+	b := f.batches[f.i]
+	f.i++
+	return b, nil
+}
+
+func fileBatch(files ...string) client.ResultSet {
+	return client.ResultSet{entity.NewColumnVarChar(milvusFileField, files)}
+}
+
+func newSweepStore(fc *fakeDeleteClient, iter *fakeRowIterator) *MilvusStore {
+	s := newCaptureStore(fc)
+	s.iterFactory = func(context.Context, *client.QueryIteratorOption) (milvusRowIterator, error) {
+		return iter, nil
+	}
+	return s
+}
+
+// TestMilvusSweepDeletesStaleFiles 回归（rag#137）：文件删除面与 Local.Rescan
+// 对齐——对账扫描多批游标，只删 file 不在 liveFiles 的行（此前没有任何对账
+// 入口，删掉的文件行永不过期，Hybrid 下幽灵片段被 RRF 当跨路共识放大）。
+func TestMilvusSweepDeletesStaleFiles(t *testing.T) {
+	fc := &fakeDeleteClient{}
+	iter := &fakeRowIterator{batches: []client.ResultSet{
+		fileBatch("a.md", "b.md"),
+		fileBatch("b.md", "c.md"), // 跨批重复的 b.md 只删一次
+	}}
+	if err := newSweepStore(fc, iter).Sweep(context.Background(), []string{"a.md", "c.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.exprs) != 1 {
+		t.Fatalf("应只删 stale 文件一次，得到 %d 次: %v", len(fc.exprs), fc.exprs)
+	}
+	if fc.exprs[0] != `file == "b.md"` {
+		t.Fatalf("删除表达式应精确命中 stale 文件: %s", fc.exprs[0])
+	}
+}
+
+// TestMilvusSweepMatchesStoredIdentity 回归（rag#137/rag#59）：列里存的是落库
+// 形态（超限路径截断+散列），liveFiles 传原始路径也必须按同一身份键比对——
+// 否则深路径文件每轮都被误判 stale 删除。
+func TestMilvusSweepMatchesStoredIdentity(t *testing.T) {
+	deep := strings.Repeat("深目录/", 128) + "one.md" // >512 字节
+	fc := &fakeDeleteClient{}
+	iter := &fakeRowIterator{batches: []client.ResultSet{
+		fileBatch(milvusFileStored(deep), "stale.md"),
+	}}
+	if err := newSweepStore(fc, iter).Sweep(context.Background(), []string{deep}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.exprs) != 1 || !strings.Contains(fc.exprs[0], `"stale.md"`) {
+		t.Fatalf("只应删除 stale.md（深路径 live 文件按落库形态匹配）: %v", fc.exprs)
+	}
+}
+
+// TestMilvusSweepEmptyLiveClearsCollection 空清单 = 集合应清空（调用方全量
+// 重扫后目录为空），删除顺序确定。
+func TestMilvusSweepEmptyLiveClearsCollection(t *testing.T) {
+	fc := &fakeDeleteClient{}
+	iter := &fakeRowIterator{batches: []client.ResultSet{fileBatch("b.md", "a.md")}}
+	if err := newSweepStore(fc, iter).Sweep(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.exprs) != 2 || fc.exprs[0] != `file == "a.md"` || fc.exprs[1] != `file == "b.md"` {
+		t.Fatalf("空清单应清空全部（字典序确定）: %v", fc.exprs)
+	}
+}
+
+// TestMilvusSweepIteratorError 游标失败必须上抛，且不得静默删任何文件。
+func TestMilvusSweepIteratorError(t *testing.T) {
+	fc := &fakeDeleteClient{}
+	iter := &fakeRowIterator{err: errors.New("query down")}
+	err := newSweepStore(fc, iter).Sweep(context.Background(), []string{"a.md"})
+	if err == nil || !strings.Contains(err.Error(), "query down") {
+		t.Fatalf("游标失败应上抛: %v", err)
+	}
+	if len(fc.exprs) != 0 {
+		t.Fatalf("游标失败时不得删除: %v", fc.exprs)
+	}
+}
+
+// TestMilvusSweepRejectsMissingFileColumn 查询结果缺 file 列 = 无法对账，
+// 显式报错而非把集合当成空（否则一次查询形态漂移就会误清全库）。
+func TestMilvusSweepRejectsMissingFileColumn(t *testing.T) {
+	fc := &fakeDeleteClient{}
+	iter := &fakeRowIterator{batches: []client.ResultSet{
+		{entity.NewColumnVarChar(milvusContentField, []string{"x"})},
+	}}
+	err := newSweepStore(fc, iter).Sweep(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), milvusFileField) {
+		t.Fatalf("缺 file 列应报错: %v", err)
+	}
+	if len(fc.exprs) != 0 {
+		t.Fatalf("缺列时不得删除: %v", fc.exprs)
 	}
 }
