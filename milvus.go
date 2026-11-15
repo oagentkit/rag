@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -34,6 +36,11 @@ const (
 	milvusContentMaxLen = 65535
 	milvusFileMaxLen    = 512
 	milvusHeadingMaxLen = 512
+
+	// milvusMetricTypeParam 索引描述里的度量参数键（SDK 未导出常量）。
+	milvusMetricTypeParam = "metric_type"
+	// milvusSweepBatchSize 对账游标单批行数。
+	milvusSweepBatchSize = 512
 )
 
 // MilvusConfig Milvus 连接配置。
@@ -50,6 +57,9 @@ type MilvusStore struct {
 	cfg      MilvusConfig
 	client   client.Client
 	embedder Embedder
+	// iterFactory 对账查询游标工厂（oagentkit/rag#137）：nil 走 SDK
+	// QueryIterator；测试注入桩以验证 Sweep 对账逻辑，不依赖真库。
+	iterFactory func(ctx context.Context, opt *client.QueryIteratorOption) (milvusRowIterator, error)
 }
 
 // withDefaults 填充缺省配置（纯函数，构造器与测试共用）。
@@ -147,7 +157,10 @@ func (s *MilvusStore) ensureCollection(ctx context.Context) error {
 //     max_length）——旧 id MaxLen=128 之类的形状漂移在此显式暴露而非写入期
 //     深报（#118 补 TypeParams 比对）；
 //  3. 集合已加载——外部建而不 load / 手工 release 过的集合，Search 直接
-//     "collection not loaded"，未加载时补 LoadCollection（与创建路径同语义）。
+//     "collection not loaded"，未加载时补 LoadCollection（与创建路径同语义）；
+//  4. 向量索引面与本仓检索参数一致（oagentkit/rag#134）——searchChunks 固定发
+//     IVF_FLAT 的 nprobe 参数并携带 cfg.MetricType，索引缺失/类型不符/metric
+//     不符都会让构造期全绿、首次 Search 才在服务端深处报错。
 func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
 	col, err := s.client.DescribeCollection(ctx, s.cfg.Collection)
 	if err != nil {
@@ -223,6 +236,11 @@ func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
 	// milvusIDMaxLen，本仓 id 又被 milvusRowID 钉在 milvusIDMaxLen 内，写入
 	// 安全），缺失按服务端缺省判定为兼容——见 #118 的判据方向说明。
 
+	// 索引面校验（rag#134）：DescribeCollection 看不到索引存在性/类型/metric。
+	if err := s.verifyVectorIndex(ctx); err != nil {
+		return err
+	}
+
 	// 未加载补 Load：外部建而不 load / 手工 release 过的集合，Search 直接
 	// "collection not loaded"——与创建路径的收尾加载同语义。
 	state, err := s.client.GetLoadState(ctx, s.cfg.Collection, nil)
@@ -237,13 +255,58 @@ func (s *MilvusStore) verifyExistingCollection(ctx context.Context) error {
 	return nil
 }
 
+// verifyVectorIndex 索引面校验（oagentkit/rag#134）：已有集合的向量索引缺失、
+// index type 不是 IVF_FLAT、或 metric 与 cfg.MetricType 不一致时，构造期必须
+// 拒绝——本仓 searchChunks 固定按 IVF_FLAT 的 nprobe 参数搜索并携带
+// cfg.MetricType，这三类差异 DescribeCollection 都看不到，首次 Retrieve 才会
+// 由服务端深处报错，错误文案也不指向本仓配置项。
+//
+// metric 判定大小写不敏感（Milvus 度量名大小写不敏感）；metric_type 参数缺失
+// = 无法确认一致性，与漂移同档拒绝（对齐 dim 的 fail-closed 判据，#117）。
+func (s *MilvusStore) verifyVectorIndex(ctx context.Context) error {
+	indexes, err := s.client.DescribeIndex(ctx, s.cfg.Collection, milvusVectorField)
+	if err != nil {
+		return fmt.Errorf("milvus: 描述已有集合索引失败: %w", err)
+	}
+	if len(indexes) == 0 {
+		return fmt.Errorf("milvus: 已有集合 %q 向量字段 %s 无索引（本仓固定按 IVF_FLAT 检索，无索引/索引缺失会在首次 Search 于服务端深处报错，换集合名或清理后重建）",
+			s.cfg.Collection, milvusVectorField)
+	}
+	wantMetric := s.cfg.MetricType
+	if wantMetric == "" {
+		// 与 withDefaults 同口径：直接构造 store 的路径（测试/包内装配）兜底。
+		wantMetric = entity.COSINE
+	}
+	observed := make([]string, 0, len(indexes))
+	for _, idx := range indexes {
+		metric := idx.Params()[milvusMetricTypeParam]
+		observed = append(observed, fmt.Sprintf("%s(index_type=%s, metric_type=%s)", idx.Name(), idx.IndexType(), metric))
+		if idx.IndexType() != entity.IvfFlat || metric == "" {
+			continue
+		}
+		if strings.EqualFold(metric, string(wantMetric)) {
+			return nil
+		}
+	}
+	if len(indexes) == 1 && indexes[0].IndexType() == entity.IvfFlat && indexes[0].Params()[milvusMetricTypeParam] == "" {
+		return fmt.Errorf("milvus: 已有集合 %q 的 IVF_FLAT 索引 %q 缺 metric_type 参数，无法确认度量一致性（与度量漂移同档拒绝带病运行，换集合名或清理后重建）",
+			s.cfg.Collection, indexes[0].Name())
+	}
+	return fmt.Errorf("milvus: 已有集合 %q 的向量索引面与本仓检索参数不兼容（需要 IVF_FLAT 且 metric_type=%s，实际 %s）——HNSW/L2/无匹配索引会在首次 Search 于服务端深处报错，换集合名或清理后重建",
+		s.cfg.Collection, wantMetric, strings.Join(observed, "; "))
+}
+
 // Index 将文档分块并索引到 Milvus（单文件写=embed→delete→upsert→flush）。
 // 批量写入请用 IndexQuiet+收尾 Flush——per-file Flush 实测 ~20s/文件（对象存储
 // 落盘 RPC 主导，向量计算亚秒），千级文件会把全量重索引拖成小时级（2026-10-08
 // bianque 对拍实弹）。
 // 幂等：成功路径上先清该文件旧数据再写入——文件变短（删章节/内容精简）时
 // chunk 数变少，只 Upsert 新块会残留 chunk_M..N-1 旧行携带过期内容参与检索
-// 挤占 topK（与 Local.Rescan 的全量重建同语义）。
+// 挤占 topK。**与 Local.Rescan 重建的等价只覆盖同一文件的内容变更**
+// （oagentkit/rag#137）：文件被删除时 Local 由全量重建自动剔除，而本后端没有
+// 自动感知删除的通道，删掉的文件其行会永不过期——需要调用方在全量重扫后调
+// Sweep 传入存活文件清单对账（此前 doc 泛称「与 Local.Rescan 的全量重建同
+// 语义」，删除面不成立）。
 // 顺序：chunk → Embed 成功 → Delete → Upsert。Embed 是外部网络调用（抖动/
 // 限流/超时是常规事件），先删后嵌会把旧索引一并清掉；倒序后最常见的失败
 // （embedding）不再动旧数据。残余窗口：Delete 成功而 Upsert/Flush 失败时旧
@@ -419,6 +482,94 @@ func milvusDeleteExpr(file string) string {
 	}
 	return fmt.Sprintf(`(%s == "%s" or %s == "%s")`,
 		milvusFileField, escapeMilvus(stored), milvusFileField, escapeMilvus(file))
+}
+
+// milvusRowIterator 对账查询游标的最小读面（client.QueryIterator 满足，
+// 测试可注入桩，oagentkit/rag#137）。
+type milvusRowIterator interface {
+	Next(ctx context.Context) (client.ResultSet, error)
+}
+
+// Sweep 对账删除：集合中 file 不在 liveFiles 里的行全部删除（oagentkit/rag#137）。
+//
+// Index/IndexQuiet 的「先清后写」只覆盖**同一文件的内容变更**；文件被删除后
+// 没有任何入口能让它的行过期（Local.Rescan 是全量重建、会自动剔除，Milvus
+// 没有对应面）。调用方在全量重扫后传入「当前仍存在的文件清单」调用本入口，
+// 删除面即与 Local.Rescan 对齐；Hybrid 装配下不调用会让 vector 路持续返回
+// 幽灵片段，且 RRF 会把跨路幽灵当共识放大。
+//
+// liveFiles 用调用方原始路径（内部归一到落库形态 milvusFileStored，超限深
+// 路径也能命中）；空清单表示集合应清空。只删 file 维度——调用方必须保证
+// 清单完整，漏传 = 误删。删除走 DeleteFile（含 raw/落库双形态表达式）。
+func (s *MilvusStore) Sweep(ctx context.Context, liveFiles []string) error {
+	live := make(map[string]struct{}, len(liveFiles))
+	for _, f := range liveFiles {
+		live[milvusFileStored(f)] = struct{}{}
+	}
+	stale, err := s.staleFiles(ctx, live)
+	if err != nil {
+		return err
+	}
+	files := make([]string, 0, len(stale))
+	for f := range stale {
+		files = append(files, f)
+	}
+	slices.Sort(files) // 删除顺序确定：中途失败时已删集合可复现、日志可比对
+	for _, f := range files {
+		if err := s.DeleteFile(ctx, f); err != nil {
+			return fmt.Errorf("milvus: 对账删除文件 %q 失败: %w", f, err)
+		}
+	}
+	return nil
+}
+
+// staleFiles 游标遍历集合中出现的全部 file 值，返回不在 live 里的集合。
+func (s *MilvusStore) staleFiles(ctx context.Context, live map[string]struct{}) (map[string]struct{}, error) {
+	it, err := s.newRowIterator(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("milvus: 对账查询初始化失败: %w", err)
+	}
+	stale := map[string]struct{}{}
+	for {
+		rs, err := it.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			return stale, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("milvus: 对账查询失败: %w", err)
+		}
+		var fileCol entity.Column
+		for _, col := range rs {
+			if col.Name() == milvusFileField {
+				fileCol = col
+				break
+			}
+		}
+		if fileCol == nil {
+			return nil, fmt.Errorf("milvus: 对账查询结果缺 %s 列", milvusFileField)
+		}
+		for i := 0; i < fileCol.Len(); i++ {
+			f, err := fileCol.GetAsString(i)
+			if err != nil {
+				return nil, fmt.Errorf("milvus: 对账读取 %s 列失败: %w", milvusFileField, err)
+			}
+			if _, ok := live[f]; !ok {
+				stale[f] = struct{}{}
+			}
+		}
+	}
+}
+
+// newRowIterator 打开对账游标（SDK QueryIterator 分批读全集合 file 列）。
+func (s *MilvusStore) newRowIterator(ctx context.Context) (milvusRowIterator, error) {
+	opt := client.NewQueryIteratorOption(s.cfg.Collection).
+		WithExpr(fmt.Sprintf(`%s != ""`, milvusIDField)).
+		WithOutputFields(milvusFileField).
+		WithBatchSize(milvusSweepBatchSize)
+	if s.iterFactory != nil {
+		return s.iterFactory(ctx, opt)
+	}
+	return s.client.QueryIterator(ctx, opt)
 }
 
 // Retrieve 实现 KnowledgeService 接口：向量相似度检索。

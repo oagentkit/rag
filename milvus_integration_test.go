@@ -130,6 +130,28 @@ func TestMilvusIntegration(t *testing.T) {
 	}
 	time.Sleep(2 * time.Second)
 
+	// 5b. Sweep 对账（rag#137）：集合里已不在存活清单中的文件应被删除。
+	// 真实 Milvus 上验证 QueryIterator（全集合 file 列）+ Delete 表达式契约。
+	if err := store.IndexQuiet(ctx, "sweep-stale.md", "# 幽灵文件\n\n应被对账删除的内容。"); err != nil {
+		t.Fatalf("Sweep 前置写入失败: %v", err)
+	}
+	if err := store.Flush(ctx); err != nil {
+		t.Fatalf("Sweep 前置 Flush 失败: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	live := []string{"go-standards.md", "deploy.md", "quiet-a.md", "quiet-b.md"}
+	if err := store.Sweep(ctx, live); err != nil {
+		t.Fatalf("Sweep 失败: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	ghost, err := store.Retrieve(ctx, "幽灵文件", 5, Filter{"file": "sweep-stale.md"})
+	if err != nil {
+		t.Fatalf("Sweep 后检索失败: %v", err)
+	}
+	if len(ghost) != 0 {
+		t.Fatalf("Sweep 后已删文件不应再命中: %+v", ghost)
+	}
+
 	// 6. AsTool
 	if store.AsTool() == nil {
 		t.Fatal("AsTool 应非 nil")

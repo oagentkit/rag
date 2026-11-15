@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -654,4 +655,252 @@ func TestRescanReadErrorWarns(t *testing.T) {
 		t.Fatal("正常文档应入索引")
 	}
 	_ = locked
+}
+
+// TestRescanAllReadFailedKeepsOldIndex 回归（oagentkit/rag#131）：目录可
+// readdir、WalkDir 全程无错，但全部 .md ReadFile 失败（fd 耗尽/批量权限
+// 拒绝/FUSE 半故障）时，必须保留旧索引并进入退避——此前保留条件只认
+// walkErr，空索引照常换入，知识库静默清空（总失败的处置比部分失败更差）。
+func TestRescanAllReadFailedKeepsOldIndex(t *testing.T) {
+	dir := t.TempDir()
+	md := filepath.Join(dir, "a.md")
+	if err := os.WriteFile(md, []byte("# 甲\n\n全败前的内容。"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 全部 .md 读失败：目录仍可遍历，ReadFile 权限拒绝。
+	if err := os.Chmod(md, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(md, 0o644) }()
+
+	l.Rescan()
+
+	chunks, err := l.Retrieve(context.Background(), "全败前", 5, nil)
+	if err != nil {
+		t.Fatalf("全量读失败不应影响旧索引检索: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("全量读失败应保留旧索引，实际被空索引替换")
+	}
+	l.mu.Lock()
+	indexLen := len(l.index)
+	retryAt := l.retryAt
+	l.mu.Unlock()
+	if indexLen == 0 {
+		t.Fatal("索引被清空")
+	}
+	if retryAt.IsZero() {
+		t.Fatal("全量读失败应进入退避（rag#135）")
+	}
+
+	// 反向对照：用户清空目录（无读失败）仍应正常换入空索引。
+	if err := os.Chmod(md, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(md); err != nil {
+		t.Fatal(err)
+	}
+	l.Rescan()
+	l.mu.Lock()
+	indexLen = len(l.index)
+	l.mu.Unlock()
+	if indexLen != 0 {
+		t.Fatalf("用户清空目录应换入空索引，实际保留 %d 块", indexLen)
+	}
+}
+
+// flipCancelCtx 在第 after 次 Err() 调用后开始返回 context.Canceled——
+// 确定性模拟"检查点之间被取消"（真实取消落在 I/O 中间，无法用 sleep 稳定
+// 复现）。仅测试单 goroutine 使用。
+type flipCancelCtx struct {
+	context.Context
+	after int
+	calls int
+}
+
+func (c *flipCancelCtx) Err() error {
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestRetrieveAlreadyCanceledContext 回归（oagentkit/rag#133）：入口即检查
+// ctx——此前 `_ = ctx` 丢弃取消信号，同步 Rescan+全索引打分照跑完。
+func TestRetrieveAlreadyCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.md"), []byte("# 甲\n\n可检索内容。"), 0o644)
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := l.Retrieve(ctx, "可检索", 5, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("已取消 ctx 应返回 context.Canceled: %v", err)
+	}
+}
+
+// TestRetrieveCancelMidRescanKeepsOldIndex 回归（oagentkit/rag#133）：过期重扫
+// 中途取消必须放弃换入并保留旧索引；旧索引此后仍可检索（一次性命中的取消
+// 信号不得把索引换成半成品）。
+func TestRetrieveCancelMidRescanKeepsOldIndex(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.md"), []byte("# 甲\n\n旧索引内容。"), 0o644)
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 强制过期，让本次 Retrieve 走自动重扫路径。
+	l.mu.Lock()
+	l.scannedAt = time.Time{}
+	l.retryAt = time.Time{}
+	l.mu.Unlock()
+
+	// 第 1 次 Err()（Retrieve 入口）放行，第 2 次（扫描条目检查）取消。
+	ctx := &flipCancelCtx{Context: context.Background(), after: 1}
+	if _, err := l.Retrieve(ctx, "旧索引", 5, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("扫描中止应返回 context.Canceled: %v", err)
+	}
+
+	chunks, err := l.Retrieve(context.Background(), "旧索引", 5, nil)
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("取消中止不得换入半成品索引，旧索引应可检索: %v %+v", err, chunks)
+	}
+}
+
+// TestRetrieveCancelDuringScoring 回归（oagentkit/rag#133）：未触发重扫时，
+// 全索引打分同样要响应取消（入口第 1 次放行，topKChunks 第 2 次取消）。
+func TestRetrieveCancelDuringScoring(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "a.md"), []byte("# 甲\n\n打分段内容。"), 0o644)
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &flipCancelCtx{Context: context.Background(), after: 1}
+	if _, err := l.Retrieve(ctx, "打分段", 5, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("打分遍历应响应取消: %v", err)
+	}
+	if chunks, err := l.Retrieve(context.Background(), "打分段", 5, nil); err != nil || len(chunks) == 0 {
+		t.Fatalf("未取消时检索应正常: %v %+v", err, chunks)
+	}
+}
+
+// TestRescanFailureBackoff 回归（oagentkit/rag#135）：根目录不可达的失败扫描
+// 必须推进退避——持续故障下每次检索都重跑失败扫描 + 重复告警。退避窗口内
+// 不自动重扫（新文件不可见），窗口到期后自动重扫并恢复。
+func TestRescanFailureBackoff(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "v1.md"), []byte("# 甲\n\nalpha old content。"), 0o644)
+	l, err := NewLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 故障形态：根目录不可达。强制过期让下一次 Retrieve 触发失败扫描。
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	l.mu.Lock()
+	l.scannedAt = time.Time{}
+	l.retryAt = time.Time{}
+	l.mu.Unlock()
+
+	chunks, err := l.Retrieve(context.Background(), "alpha", 5, nil)
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("失败扫描期间旧索引应继续服务: %v %+v", err, chunks)
+	}
+	l.mu.Lock()
+	retryAt := l.retryAt
+	l.mu.Unlock()
+	if retryAt.IsZero() {
+		t.Fatal("失败扫描后应设置退避窗口")
+	}
+
+	// 恢复目录并写入新文件：退避窗口内不得自动重扫（新内容不可见）。
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "v2.md"), []byte("# 乙\n\nzulu new content。"), 0o644)
+	if chunks, err := l.Retrieve(context.Background(), "zulu", 5, nil); err != nil || len(chunks) != 0 {
+		t.Fatalf("退避窗口内不应自动重扫: %v %+v", err, chunks)
+	}
+
+	// 退避到期：自动重扫，新内容可见、旧内容随全量重建消失。
+	l.mu.Lock()
+	l.retryAt = time.Now().Add(-time.Second)
+	l.mu.Unlock()
+	chunks, err = l.Retrieve(context.Background(), "zulu", 5, nil)
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("退避到期应自动重扫: %v %+v", err, chunks)
+	}
+	if chunks, _ := l.Retrieve(context.Background(), "alpha", 5, nil); len(chunks) != 0 {
+		t.Fatalf("全量重建后旧文件内容应消失: %+v", chunks)
+	}
+}
+
+// TestChunkMarkdownFenceLengthMatching 回归（oagentkit/rag#132）：围栏闭合按
+// 反引号长度匹配——4 反引号包裹的 ``` 示例不再错位翻转，示例内 # 注释不被
+// 当标题切块；闭合后真标题照常切块。
+func TestChunkMarkdownFenceLengthMatching(t *testing.T) {
+	md := "# 真标题\n\n" +
+		"````markdown\n" +
+		"```go\n" +
+		"// 代码注释\n" +
+		"# 示例里的伪标题\n" +
+		"```\n" +
+		"````\n\n" +
+		"## 下一节\n\n正文内容。\n"
+	chunks := chunkMarkdown(md)
+	var all strings.Builder
+	for _, c := range chunks {
+		if c.heading == "示例里的伪标题" {
+			t.Fatalf("4 反引号包裹内的 # 行被当成标题切块: %+v", chunks)
+		}
+		all.WriteString(c.content)
+		all.WriteString("\n")
+	}
+	if !strings.Contains(all.String(), "# 示例里的伪标题") {
+		t.Fatalf("伪标题应作为代码内容保留: %q", all.String())
+	}
+	found := false
+	for _, c := range chunks {
+		if c.heading == "下一节" && strings.Contains(c.content, "正文内容。") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("围栏闭合后真标题应照常切块: %+v", chunks)
+	}
+}
+
+// TestChunkMarkdownFenceShorterLineIsContent 回归（oagentkit/rag#132）：3 反
+// 引号行在 4 反引号块内是内容，不闭合也不翻转——其后的 # 行仍受代码块保护。
+func TestChunkMarkdownFenceShorterLineIsContent(t *testing.T) {
+	md := "````\n" +
+		"```\n" +
+		"# 仍是代码\n" +
+		"````\n\n" +
+		"## 正文节\n\n正文。\n"
+	chunks := chunkMarkdown(md)
+	for _, c := range chunks {
+		if c.heading == "仍是代码" {
+			t.Fatalf("短围栏后的 # 行仍在代码块内，不应成为标题: %+v", chunks)
+		}
+	}
+	found := false
+	for _, c := range chunks {
+		if c.heading == "正文节" && strings.Contains(c.content, "正文。") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("4 反引号闭合后正文应照常切块: %+v", chunks)
+	}
 }
