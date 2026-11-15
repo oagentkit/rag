@@ -74,6 +74,9 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 	if topK <= 0 {
 		topK = defaultTopK
 	}
+	if topK > maxTopK {
+		topK = maxTopK // 上界收口（#138）：两路候选与融合预分配都按此值，防超大入参 OOM
+	}
 	lanes := []func() ([]Chunk, error){
 		func() ([]Chunk, error) { return h.vector.Retrieve(ctx, query, topK*2, filter) },
 		func() ([]Chunk, error) { return h.keyword.Retrieve(ctx, query, topK*2, filter) },
