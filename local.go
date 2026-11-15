@@ -26,7 +26,12 @@ import (
 var ragLog = logx.Delegating("oagentkit-rag")
 
 const (
-	defaultTopK      = 5
+	defaultTopK = 5
+	// maxTopK 检索条数上界（#138）：topKChunks 按调用方值预分配
+	// （scored 64B/条 ⇒ 1e8 ≈ 6.4GB 直接 OOM kill），Hybrid 还 ×2。
+	// 异常入参（把字节数/配置串误当 topK）在此收口，与 defaultTopK 的
+	// 下界归一同一处——上下界都归一到 [1, maxTopK]。
+	maxTopK          = 1000
 	chunkTargetRunes = 600
 	rescanInterval   = 10 * time.Minute
 	toolSnippetRunes = 800
@@ -98,6 +103,9 @@ func (l *Local) Retrieve(ctx context.Context, query string, topK int, filter Fil
 
 	if topK <= 0 {
 		topK = defaultTopK
+	}
+	if topK > maxTopK {
+		topK = maxTopK // 上界收口（#138）：预分配按此值，防超大入参打爆堆
 	}
 	qt := tokenize(query)
 	if len(qt) == 0 || len(idx) == 0 {
