@@ -9,6 +9,8 @@ go get github.com/oagentkit/rag
 | 包 | 职责 |
 |---|---|
 | `rag` | 知识检索：向量化接口（`Embedder`）、向量后端可插拔、混合召回与重排 |
+| `rag/wiki` | 持久 wiki 写侧：页面 upsert/删除/乐观版本、增量摄取（`Ingest`）、结构检查（`Lint`） |
+| `rag/wiki/fsstore` | wiki 的文件系统参考实现（markdown + YAML front-matter，零外部服务） |
 
 ## 定位
 

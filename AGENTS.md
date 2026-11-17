@@ -8,6 +8,8 @@
 
 ```
 `/`（module 根，包名 rag → import `github.com/oagentkit/rag`）
+`/wiki`（包名 wiki → import `github.com/oagentkit/rag/wiki`）：持久 wiki 写侧
+`/wiki/fsstore`（包名 fsstore → import `github.com/oagentkit/rag/wiki/fsstore`）：文件系统参考实现
 ```
 
 > **包为什么住在 module 根（不要再挪回子目录）**
