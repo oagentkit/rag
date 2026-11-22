@@ -706,8 +706,10 @@ func (s *MilvusStore) AsTool() tool.BaseTool {
 	return t
 }
 
-// Close 关闭 Milvus 连接。
-func (s *MilvusStore) Close() error {
+// Close 关闭 Milvus 连接。ctx 为生命周期契约参数（oekit Close(ctx) error
+// 同型）：SDK 的 client.Close 是立即路径，ctx 当前不阻塞任何步骤——为宿主
+// 收口钩子（bootstrap AddResource 同型）直连而设。
+func (s *MilvusStore) Close(ctx context.Context) error {
 	if s.client != nil {
 		return s.client.Close()
 	}
