@@ -2,7 +2,7 @@
 
 > 本文件由 `matrix-tools/scripts/gen_changelogs.py` 从 git 历史生成，按 tag 切段、取每段内的 conventional commit 渲染。
 
-## [v0.12.0] — 2026-11-22
+## [v0.12.0] — 2026-11-23
 
 ### 新增(wiki)：持久 wiki 写侧——upsert/删除/乐观版本 + Ingest/Lint/fsstore(#144)
 
@@ -35,6 +35,13 @@ Fixes #134
 Fixes #135
 Fixes #136
 Fixes #137
+
+### 重构(milvus)：MilvusStore.Close 统一为 Close(ctx) error 生命周期契约
+
+oekit 生态 Close 契约是 Close(ctx) error + 幂等。SDK client.Close 是立即路径，
+ctx 为契约参数不阻塞任何步骤，宿主收口钩子（bootstrap AddResource 同型）可直连。
+Milvus 根包拆 rag/milvus 子包（milvus SDK 隔离从文件级升到包级）另单跟踪——
+牵动根包 mdChunk/truncateUTF8/fileStored 等非导出符号的归属，不在本单夹带。
 
 - 杂务(deps)：依赖地板追到最新——github.com/oekit/pkg v0.59.0
 
@@ -212,6 +219,26 @@ oekit 基座与矩阵模块都在高频发版 ⇒ 地板是**跑步机**，落�
 与 `go mod tidy -diff`（无漂移）⇒ 改动**只影响依赖版本**，零行为差异。
 只改 `go.mod` / `go.sum` ⇒ 不需要 CHANGELOG 条目（版本段由下次发版的 `prewrite` 生成）。
 
+
+- CI：tag push 也触发门禁（与 oekit 侧同口径）
+
+各仓 CI 薄调用层此前只监听 main push / PR / manual ⇒ 打 tag 不触发 CI：
+tag 那一刻没有独立证据（tag 受保护、不可重打，而「tag 后才暴露的错」一个都跑不到）。
+本 PR 只加一行：on.push 下加 tags: ['v*']，让 tag 推送也跑共享 workflow
+（Lint / Test / CHANGELOG coverage / Receipts / 矩阵登记检查），
+与 oekit 侧的薄调用层同口径。
+关联：oagentkit/.github 的 tag 面接线。
+
+
+- 文档(changelog)：预写 v0.12.0 待发版段 + 地板随迁 pkg v0.60.0
+
+* docs(changelog): 预写 v0.12.0 待发版段
+由 release.py prewrite 生成。
+本提交**只**改 CHANGELOG.md——混入别的文件会被 squash 合成一个提交，
+生成器按「实际改了哪些文件」剔除零信息量提交的判据就会失效。
+* chore: 依赖地板随迁 oekit/pkg v0.60.0
+
+- 文档(AGENTS)：错误协议宣告对齐实际（stdlib 同型 sentinel；BizError 限 HTTP 宿主，本 org 库层不用）
 
 ## [v0.11.11] — 2026-11-14
 
