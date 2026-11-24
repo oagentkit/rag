@@ -7,7 +7,8 @@
 ## 本仓包含
 
 ```
-`/`（module 根，包名 rag → import `github.com/oagentkit/rag`）
+`/`（module 根，包名 rag → import `github.com/oagentkit/rag`）：检索契约 + 本地索引（TF-IDF）
+`/milvus`（包名 milvus → import `github.com/oagentkit/rag/milvus`）：Milvus 向量后端
 `/wiki`（包名 wiki → import `github.com/oagentkit/rag/wiki`）：持久 wiki 写侧
 `/wiki/fsstore`（包名 fsstore → import `github.com/oagentkit/rag/wiki/fsstore`）：文件系统参考实现
 `/ontology`（包名 ontology → import `github.com/oagentkit/rag/ontology`）：实体/关系本体层的契约与判据（Schema/Triple/Validate/Store）
@@ -72,6 +73,11 @@ tag 必须落在 CHANGELOG 提交**之后** —— 下游 `go get` 拿到的是 
 - **单路召回失败不得降级为 `(nil, nil)`。** 混合召回中任一路 panic 或失败
   要作为该路失败参与裁决；全部路失败时**返回 panic 错误而非静默空结果**。
 - 向量后端可插拔，新增后端不得改 `Embedder`/`KnowledgeService` 接口形状 —— 那会让所有后端同时 breaking。
+- **向量 sdk 只许住在 `rag/milvus` 子包**（oagentkit/rag#156）：根包 import 任何
+  符号都不许把 sdk 及其传递依赖拖进下游二进制。判据由 `make dep-guard`
+  （`go list -deps` 依赖闭包）守着，把 sdk 拉回根包会当场红。向量后端与本地索引
+  共用的身份键/切块/过滤契约在**根包**导出（`ChunkID`/`FileStored`/
+  `TruncateUTF8`/`ChunkMarkdown`/`ValidateFilter`），子包 import 根包，方向不可反。
 - **本体层只做契约与判据**：不做抽取（提示词留宿主）、不建图数据库（`Store` 是接口 + 内存参考实现，PG/Neo4j 由宿主接）、不引入 wiki 依赖（wiki = 叙事，ontology = 结构）。判据体（`Validate`）必须是**纯函数**（不碰 IO、不读全局状态、不改入参），取数面靠 `Store` 注入。
 - 本体层的**实体名规范化不在包内**（大小写折叠/别名归一属领域资产，留在宿主）；**不假设实体登记完备**——未登记的节点跳过依赖类型的检查，其余判据照做。
 

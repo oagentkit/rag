@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/oagentkit/rag"
+	"github.com/oagentkit/rag/milvus"
 	"github.com/oagentkit/rag/wiki"
 	"github.com/oagentkit/rag/wiki/fsstore"
 )
@@ -24,9 +25,9 @@ func (r rescanIndexer) DeleteFile(context.Context, string) error {
 	return nil
 }
 
-// MilvusStore 的 Index/DeleteFile 方法集应直接满足 wiki.Indexer——
-// 接缝不要求为既有后端写适配器。
-var _ wiki.Indexer = (*rag.MilvusStore)(nil)
+// 向量后端（rag/milvus 子包）的 Index/DeleteFile 方法集应直接满足
+// wiki.Indexer——接缝不要求为既有后端写适配器。
+var _ wiki.Indexer = (*milvus.Store)(nil)
 
 func TestWikiWriteIsImmediatelyRetrievable(t *testing.T) {
 	ctx := context.Background()

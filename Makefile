@@ -1,5 +1,5 @@
 # oagentkit/rag —— 与共享 CI(oagentkit/.github go-ci.yml)同口径的本地门禁载体(agentkit#138)
-.PHONY: test test-race test-coverage lint fmt vet ci tidy help
+.PHONY: test test-race test-coverage dep-guard lint fmt vet ci tidy help
 
 ## test: 运行所有单元测试
 test:
@@ -14,6 +14,10 @@ test-coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
+## dep-guard: 依赖面判据——除 rag/milvus 子包外，本仓任何包都不得链向量 sdk
+dep-guard:
+	go test -count=1 -run TestModuleDependencySurface ./...
+
 ## lint: 运行 golangci-lint（需要先安装）
 lint:
 	golangci-lint run ./...
@@ -27,10 +31,11 @@ fmt:
 vet:
 	go vet ./...
 
-## ci: 模拟 CI 流程（fmt 检查 + vet + test-race），与共享 CI go-ci.yml 同口径
+## ci: 模拟 CI 流程（fmt 检查 + vet + 依赖面判据 + test-race），与共享 CI go-ci.yml 同口径
 ci:
 	@test -z "$$(gofmt -l . | grep -v vendor | tee /dev/stderr)" || (echo "请运行 make fmt" && exit 1)
 	go vet ./...
+	$(MAKE) dep-guard
 	go test -race -count=1 ./...
 
 ## tidy: 整理 go.mod

@@ -571,7 +571,7 @@ func TestLocalChunkStableID(t *testing.T) {
 	}
 	ids := map[string]bool{}
 	for _, c := range chunks {
-		if want := chunkID(c.Metadata["file"], 0); c.ID != want {
+		if want := ChunkID(FileStored(c.Metadata["file"]), 0); c.ID != want {
 			t.Fatalf("ID=%q want %q（file=%q）", c.ID, want, c.Metadata["file"])
 		}
 		ids[c.ID] = true
