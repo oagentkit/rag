@@ -18,6 +18,31 @@ Neighbors 返回确定顺序（主体/谓词/客体字典序），depth=0 空、
 三条刻意边界：不做抽取（提示词留宿主）、不建图数据库（PG/Neo4j 由宿主接）、
 不引入 wiki 依赖（wiki 是叙事、ontology 是结构）。
 
+### 重构(milvus)：向量后端挪到 rag/milvus 子包——根包不再链向量 sdk
+
+向量后端（milvus-sdk-go）此前只被根目录 milvus.go import，而根目录五个文件
+全是 package rag ⇒ import github.com/oagentkit/rag 的任何符号（哪怕只用本地
+索引/混合召回）都会链接 milvus sdk 及其闭包（cockroachdb/errors、sentry-go、
+gogo/protobuf 等，矩阵最重传递链）。README「向量后端可插拔」此前只是接口层面
+的承诺。
+- milvus 后端挪到 rag/milvus 子包：构造器 milvus.NewStore(ctx, cfg, embedder)，
+  类型 milvus.Config / milvus.Store（避 Go 惯例 stutter，不叫 MilvusConfig）。
+- 根包持有两路共用的身份键与契约单源并导出：ChunkID / FileStored /
+  FileStoredMaxLen / FileStoredHashLen / TruncateUTF8 / ValidateFilter /
+  DefaultTopK / ChunkMarkdown。子包 import 根包，方向不可反——根包不 import
+  子包，根包才不链 sdk，隔离才成立。
+- mdChunk / chunkMarkdown / ragLog 留根包：切块状态机与工具件仍是根包的。
+- 新增依赖面判据（make dep-guard，走 go list -deps 口径）：除 rag/milvus 外，
+  本仓任何包的依赖闭包都不得含向量 sdk 及其重传递依赖——把 sdk 拉回根包会
+  当场红。已做反向验证（注入违规 → 判红 → 撤销恢复绿）。
+- 测试随实现走：milvus 侧用例迁到子包，OpenAI embedder 的两个用例归位根包；
+  跨路 ID 一致性用例拆成两侧各钉「取根包身份键单源」。
+- 根包依赖闭包 471 → 300 个包，向量 sdk 及其重传递依赖命中 31 → 0；覆盖率
+  总计 81.8% → 81.8%（根包 78.0% → 89.4%，向量后端 57.7%）。
+下游：只用本地索引/混合召回的调用方零改动；用 milvus 的改 import 路径
+github.com/oagentkit/rag/milvus，类型 MilvusStore → milvus.Store、
+MilvusConfig → milvus.Config、NewMilvusStore → milvus.NewStore，并 go mod tidy。
+
 - 文档(ontology)：模块清单补本体层与三条边界说明
 
 README 增「本体层（rag/ontology）」一节：是什么、不是什么（不做抽取、不建图库）、
