@@ -1,8 +1,7 @@
-package rag
+package milvus
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -11,6 +10,9 @@ import (
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+
+	"github.com/oagentkit/rag"
+	"github.com/oekit/pkg/errors"
 )
 
 // mockEmbedder 测试用 embedding 实现：返回固定维度的伪向量。
@@ -32,21 +34,6 @@ func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 func (m *mockEmbedder) Dim() int { return m.dim }
-
-func TestOpenAIEmbedderDim(t *testing.T) {
-	e := NewOpenAIEmbedder("https://api.example.com/v1", "key", "model", 128)
-	if e.Dim() != 128 {
-		t.Fatalf("Dim = %d, want 128", e.Dim())
-	}
-}
-
-func TestOpenAIEmbedderString(t *testing.T) {
-	e := NewOpenAIEmbedder("https://api.example.com/v1", "key", "model", 128)
-	s := e.String()
-	if s == "" {
-		t.Fatal("String() 不应为空")
-	}
-}
 
 func TestMockEmbedder(t *testing.T) {
 	m := &mockEmbedder{dim: 8}
@@ -81,8 +68,8 @@ func TestMockEmbedder(t *testing.T) {
 	}
 }
 
-func TestMilvusConfigDefaults(t *testing.T) {
-	cfg := MilvusConfig{Address: "localhost:19530"}
+func TestConfigDefaults(t *testing.T) {
+	cfg := Config{Address: "localhost:19530"}
 	m := &mockEmbedder{dim: 64}
 
 	// 默认值填充走生产代码的 withDefaults 纯函数（不再手抄实现）
@@ -116,8 +103,8 @@ func TestEscapeMilvus(t *testing.T) {
 
 // 构造期 nil embedder 返回 error（rag#34）：此前直接 embedder.Dim() nil 解引用
 // panic——包内其他构造面均返回 error，本构造器对齐。
-func TestNewMilvusStoreNilEmbedder(t *testing.T) {
-	if _, err := NewMilvusStore(context.Background(), MilvusConfig{Address: "127.0.0.1:19530"}, nil); err == nil {
+func TestNewStoreNilEmbedder(t *testing.T) {
+	if _, err := NewStore(context.Background(), Config{Address: "127.0.0.1:19530"}, nil); err == nil {
 		t.Fatal("nil embedder 应返回 error 而非 panic")
 	}
 }
@@ -158,7 +145,7 @@ func TestIndexRowsVarCharGuards(t *testing.T) {
 	// CJK 超长标题：600 字节 > 512——按 rune 边界截断（不劈多字节字符），
 	// 内容全文保留在 content 字段
 	md := "# " + strings.Repeat("标", 200) + "\n\n正文。\n"
-	rows, err := indexRows("doc.md", chunkMarkdown(md))
+	rows, err := indexRows("doc.md", rag.ChunkMarkdown(md))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,18 +166,18 @@ func TestIndexRowsVarCharGuards(t *testing.T) {
 	// 深路径 file 超限（CJK 路径 >512 字节）：截到上限内并附散列后缀，主键同步有界
 	deep1 := strings.Repeat("深目录/", 128) + "one.md"
 	deep2 := strings.Repeat("深目录/", 128) + "two.md"
-	r1, err := indexRows(deep1, chunkMarkdown("# 甲\n\n正文一。\n"))
+	r1, err := indexRows(deep1, rag.ChunkMarkdown("# 甲\n\n正文一。\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := indexRows(deep2, chunkMarkdown("# 乙\n\n正文二。\n"))
+	r2, err := indexRows(deep2, rag.ChunkMarkdown("# 乙\n\n正文二。\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, rs := range [][]milvusRow{r1, r2} {
 		for j, row := range rs {
-			if got := len(row.file); got > milvusFileMaxLen {
-				t.Fatalf("rows[%d][%d] file %d 字节超限 %d", i, j, got, milvusFileMaxLen)
+			if got := len(row.file); got > rag.FileStoredMaxLen {
+				t.Fatalf("rows[%d][%d] file %d 字节超限 %d", i, j, got, rag.FileStoredMaxLen)
 			}
 			if got := len(row.id); got > milvusIDMaxLen {
 				t.Fatalf("rows[%d][%d] id %d 字节超限 %d", i, j, got, milvusIDMaxLen)
@@ -208,7 +195,7 @@ func TestIndexRowsVarCharGuards(t *testing.T) {
 	}
 
 	// 短路径原样透传（不截断、不散列），主键保持 file#chunk_N 形态
-	r3, err := indexRows("doc.md", chunkMarkdown("# 丙\n\n正文三。\n"))
+	r3, err := indexRows("doc.md", rag.ChunkMarkdown("# 丙\n\n正文三。\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +211,7 @@ func TestIndexRowsVarCharGuards(t *testing.T) {
 // 多字节字符），不再假设上游不变量恒真。
 func TestIndexRowsContentByteGuard(t *testing.T) {
 	over := strings.Repeat("长", 30000) // 90000 字节 > 65535
-	rows, err := indexRows("doc.md", []mdChunk{{heading: "标题", content: over}})
+	rows, err := indexRows("doc.md", []rag.Chunk{{Content: over, Metadata: map[string]string{"heading": "标题"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +226,7 @@ func TestIndexRowsContentByteGuard(t *testing.T) {
 	}
 
 	// 限内原样透传（不截断，既有形态不变）
-	rows2, err := indexRows("doc.md", []mdChunk{{content: "正文。"}})
+	rows2, err := indexRows("doc.md", []rag.Chunk{{Content: "正文。"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +240,7 @@ func TestIndexRowsContentByteGuard(t *testing.T) {
 // id 上界=512+len("#chunk_N")，序号达 10 位才触界（单文件 1e9 块不存在，
 // 此处直接构造边界序号验证守卫本身）。
 func TestMilvusRowIDGuard(t *testing.T) {
-	file := strings.Repeat("a", milvusFileMaxLen)
+	file := strings.Repeat("a", rag.FileStoredMaxLen)
 	// 9 位序号恰好压线：512+7+9=528
 	id, err := milvusRowID(file, 999999999)
 	if err != nil {
@@ -280,8 +267,8 @@ func (f *fakeDeleteClient) Delete(_ context.Context, _ string, _ string, expr st
 	return nil
 }
 
-func newCaptureStore(fc *fakeDeleteClient) *MilvusStore {
-	return &MilvusStore{cfg: MilvusConfig{Collection: "t"}, client: fc, embedder: &mockEmbedder{dim: 4}}
+func newCaptureStore(fc *fakeDeleteClient) *Store {
+	return &Store{cfg: Config{Collection: "t"}, client: fc, embedder: &mockEmbedder{dim: 4}}
 }
 
 // TestMilvusDeleteFileMatchesStoredForm 回归（rag#59）：超限路径落库为
@@ -297,7 +284,7 @@ func TestMilvusDeleteFileMatchesStoredForm(t *testing.T) {
 	if len(fc.exprs) != 1 {
 		t.Fatalf("应执行 1 次删除，得到 %d", len(fc.exprs))
 	}
-	stored := escapeMilvus(milvusFileStored(deep))
+	stored := escapeMilvus(rag.FileStored(deep))
 	if !strings.Contains(fc.exprs[0], stored) {
 		t.Fatalf("删除表达式未命中落库形态 %q: %s", stored, fc.exprs[0])
 	}
@@ -321,16 +308,16 @@ func TestMilvusDeleteFileMatchesStoredForm(t *testing.T) {
 // 的 Filter 静默恒空。
 func TestMilvusFilterExprFileIdentity(t *testing.T) {
 	deep := strings.Repeat("深目录/", 128) + "one.md"
-	expr, err := milvusFilterExpr(Filter{"file": deep})
+	expr, err := milvusFilterExpr(rag.Filter{"file": deep})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored := escapeMilvus(milvusFileStored(deep))
+	stored := escapeMilvus(rag.FileStored(deep))
 	if !strings.Contains(expr, stored) {
 		t.Fatalf("过滤表达式未归一到落库形态 %q: %s", stored, expr)
 	}
 	// 限内路径归一为恒等：表达式形态不变
-	expr2, err := milvusFilterExpr(Filter{"file": "doc.md"})
+	expr2, err := milvusFilterExpr(rag.Filter{"file": "doc.md"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,30 +326,30 @@ func TestMilvusFilterExprFileIdentity(t *testing.T) {
 	}
 }
 
-// TestCrossLaneChunkIDAgreeOnStoredIdentity 回归（rag#59）：同一文件的 chunk
-// ID 在两条索引路必须一致——Milvus 主键由落库形态派生，Local 此前由原始 rel
-// 路径派生，超限路径双路 ID 永不相等，FuseRRF 按 ID 归并双路共识静默失效
-// （同源副本无法归并，混合检索退化为两路各自计分）。
-func TestCrossLaneChunkIDAgreeOnStoredIdentity(t *testing.T) {
+// TestIndexRowsIDsUseSharedIdentity 回归（rag#59 / oagentkit/rag#156）：主键 ID
+// 必须由**根包导出的身份键单源**派生（rag.FileStored + rag.ChunkID）——向量后端
+// 与本地索引两路共用同一身份形态，跨路归并（FuseRRF 按 ID）才成立。
+// 本用例钉向量后端一侧；本地索引一侧由根包 identity_test.go 的对应用例钉住
+// （两路都指向同一单源 ⇒ 跨路一致性由构造保证，不靠两处各写一份）。
+func TestIndexRowsIDsUseSharedIdentity(t *testing.T) {
 	deep := strings.Repeat("深目录/", 128) + "one.md" // >512 字节 rel 路径
-	rows, err := indexRows(deep, chunkMarkdown("# 甲\n\n正文。\n"))
+	rows, err := indexRows(deep, rag.ChunkMarkdown("# 甲\n\n正文。\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var idx []indexedChunk
-	df := map[string]int{}
-	indexMarkdownFile(deep, "# 甲\n\n正文。\n", &idx, df)
-	if len(rows) == 0 || len(idx) == 0 {
-		t.Fatalf("两路都应产出 chunk: milvus=%d local=%d", len(rows), len(idx))
+	if len(rows) == 0 {
+		t.Fatal("应产出至少一行")
 	}
-	if idx[0].chunk.ID != rows[0].id {
-		t.Fatalf("双路 ID 分裂: local=%q milvus=%q", idx[0].chunk.ID, rows[0].id)
+	if want := rag.ChunkID(rag.FileStored(deep), 0); rows[0].id != want {
+		t.Fatalf("主键 ID 应取根包身份键单源: got=%q want=%q", rows[0].id, want)
 	}
-	// 限内路径 raw == stored：Local ID 形态保持不变
-	var idx2 []indexedChunk
-	indexMarkdownFile("doc.md", "# 乙\n\n正文。\n", &idx2, df)
-	if idx2[0].chunk.ID != "doc.md#chunk_0" {
-		t.Fatalf("限内路径 Local ID 形态不应变化: %q", idx2[0].chunk.ID)
+	// 限内路径 raw == stored：ID 形态保持不变
+	rows2, err := indexRows("doc.md", rag.ChunkMarkdown("# 乙\n\n正文。\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows2[0].id != "doc.md#chunk_0" {
+		t.Fatalf("限内路径 ID 形态不应变化: %q", rows2[0].id)
 	}
 }
 
@@ -390,7 +377,7 @@ func fileBatch(files ...string) client.ResultSet {
 	return client.ResultSet{entity.NewColumnVarChar(milvusFileField, files)}
 }
 
-func newSweepStore(fc *fakeDeleteClient, iter *fakeRowIterator) *MilvusStore {
+func newSweepStore(fc *fakeDeleteClient, iter *fakeRowIterator) *Store {
 	s := newCaptureStore(fc)
 	s.iterFactory = func(context.Context, *client.QueryIteratorOption) (milvusRowIterator, error) {
 		return iter, nil
@@ -425,7 +412,7 @@ func TestMilvusSweepMatchesStoredIdentity(t *testing.T) {
 	deep := strings.Repeat("深目录/", 128) + "one.md" // >512 字节
 	fc := &fakeDeleteClient{}
 	iter := &fakeRowIterator{batches: []client.ResultSet{
-		fileBatch(milvusFileStored(deep), "stale.md"),
+		fileBatch(rag.FileStored(deep), "stale.md"),
 	}}
 	if err := newSweepStore(fc, iter).Sweep(context.Background(), []string{deep}); err != nil {
 		t.Fatal(err)

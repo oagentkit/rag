@@ -1,5 +1,5 @@
-// Hybrid 向量+关键词双路混合检索（R10，RRF 融合）：语义路（MilvusStore，embedding
-// 近邻）与词料路（Local，TF-IDF）各取候选，倒数排名融合（Reciprocal Rank Fusion）——
+// Hybrid 向量+关键词双路混合检索（R10，RRF 融合）：语义路（向量后端 milvus.Store，
+// embedding 近邻）与词料路（Local，TF-IDF）各取候选，倒数排名融合（Reciprocal Rank Fusion）——
 // 跨路命中的文档得分累加（双路都认为相关=真相关的最强信号），单路独有的按名次计分。
 // 降级哲学与装配侧一致：任一路失败降级为另一路纯检索（检索面永不因一路缺失禁用），
 // 双路全败才回错。
@@ -32,8 +32,9 @@ type Hybrid struct {
 // NewHybrid 构造混合检索器。任一检索路为 nil 返回 error（oagentkit/rag#136）：
 // 此前构造期零校验，nil 路在每次 Retrieve 的 lane goroutine 内 panic——被
 // FanInErr recover 成 PanicError 并全局上报，单路有结果时还被降级分支吞掉，
-// 装配错误被伪装成运行时 bug 信号。对齐 NewMilvusStore（rag#34）的构造期
-// fail-fast；vector 的 typed-nil（如 (*MilvusStore)(nil) 装入接口）同样拒绝。
+// 装配错误被伪装成运行时 bug 信号。对齐向量后端构造器 milvus.NewStore
+// （rag#34）的构造期 fail-fast；vector 的 typed-nil（如 (*milvus.Store)(nil)
+// 装入接口）同样拒绝。
 func NewHybrid(vector KnowledgeService, keyword *Local) (*Hybrid, error) {
 	if isNilKnowledgeService(vector) {
 		return nil, errors.New("hybrid: vector 检索路不能为空")
@@ -72,7 +73,7 @@ func (h *Hybrid) Retrieve(ctx context.Context, query string, topK int, filter Fi
 	// 在 FuseRRF 的 keys[:topK] 裸 panic（且在 FanInErr 收口之外的主 goroutine，
 	// 降级机制接不住）。
 	if topK <= 0 {
-		topK = defaultTopK
+		topK = DefaultTopK
 	}
 	if topK > maxTopK {
 		topK = maxTopK // 上界收口（#138）：两路候选与融合预分配都按此值，防超大入参 OOM
