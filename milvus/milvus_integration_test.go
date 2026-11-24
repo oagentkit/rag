@@ -1,4 +1,4 @@
-package rag
+package milvus
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+
+	"github.com/oagentkit/rag"
 )
 
 // hashEmbedder 确定性测试 embedding：文本 hash → 固定维度向量。
@@ -45,7 +47,7 @@ func TestMilvusIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, err := NewMilvusStore(ctx, MilvusConfig{
+	store, err := NewStore(ctx, Config{
 		Address:    addr,
 		Collection: collection,
 		Dimension:  16,
@@ -92,7 +94,7 @@ func TestMilvusIntegration(t *testing.T) {
 	}
 
 	// 3. Filter：按 file 精确过滤
-	filtered, err := store.Retrieve(ctx, "配置", 5, Filter{"file": "deploy.md"})
+	filtered, err := store.Retrieve(ctx, "配置", 5, rag.Filter{"file": "deploy.md"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +118,7 @@ func TestMilvusIntegration(t *testing.T) {
 		t.Fatalf("批末 Flush 失败: %v", err)
 	}
 	time.Sleep(2 * time.Second)
-	qchunks, err := store.Retrieve(ctx, "Redis 缓存击穿", 3, Filter{"file": "quiet-a.md"})
+	qchunks, err := store.Retrieve(ctx, "Redis 缓存击穿", 3, rag.Filter{"file": "quiet-a.md"})
 	if err != nil {
 		t.Fatalf("静默批检索失败: %v", err)
 	}
@@ -144,7 +146,7 @@ func TestMilvusIntegration(t *testing.T) {
 		t.Fatalf("Sweep 失败: %v", err)
 	}
 	time.Sleep(2 * time.Second)
-	ghost, err := store.Retrieve(ctx, "幽灵文件", 5, Filter{"file": "sweep-stale.md"})
+	ghost, err := store.Retrieve(ctx, "幽灵文件", 5, rag.Filter{"file": "sweep-stale.md"})
 	if err != nil {
 		t.Fatalf("Sweep 后检索失败: %v", err)
 	}

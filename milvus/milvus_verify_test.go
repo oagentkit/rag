@@ -1,13 +1,15 @@
-package rag
+package milvus
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+
+	"github.com/oagentkit/rag"
+	"github.com/oekit/pkg/errors"
 )
 
 // fakeVerifyClient 实现 verifyExistingCollection 用到的面：
@@ -41,26 +43,26 @@ func goodVectorIndex() entity.Index {
 
 // verifyStore 以「创建路径同款 schema」为基线构造存在路径校验的 store：
 // id 主键 max_length=milvusIDMaxLen、embedding dim=1024、IVF_FLAT/COSINE 索引。
-func verifyStore(t *testing.T, mutate func(schema *entity.Schema)) *MilvusStore {
+func verifyStore(t *testing.T, mutate func(schema *entity.Schema)) *Store {
 	t.Helper()
 	schema := entity.NewSchema().
 		WithName("c").
 		WithField(entity.NewField().WithName(milvusIDField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusIDMaxLen).WithIsPrimaryKey(true)).
 		WithField(entity.NewField().WithName(milvusContentField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusContentMaxLen)).
-		WithField(entity.NewField().WithName(milvusFileField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusFileMaxLen)).
+		WithField(entity.NewField().WithName(milvusFileField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(rag.FileStoredMaxLen)).
 		WithField(entity.NewField().WithName(milvusHeadingField).WithDataType(entity.FieldTypeVarChar).WithMaxLength(milvusHeadingMaxLen)).
 		WithField(entity.NewField().WithName(milvusVectorField).WithDataType(entity.FieldTypeFloatVector).WithDim(1024))
 	if mutate != nil {
 		mutate(schema)
 	}
-	return &MilvusStore{
-		cfg:    MilvusConfig{Collection: "c", Dimension: 1024, MetricType: entity.COSINE},
+	return &Store{
+		cfg:    Config{Collection: "c", Dimension: 1024, MetricType: entity.COSINE},
 		client: &fakeVerifyClient{col: &entity.Collection{Schema: schema}, indexes: []entity.Index{goodVectorIndex()}},
 	}
 }
 
 // verifyStoreWithIndexes 基线 store + 指定索引面。
-func verifyStoreWithIndexes(t *testing.T, indexes ...entity.Index) *MilvusStore {
+func verifyStoreWithIndexes(t *testing.T, indexes ...entity.Index) *Store {
 	t.Helper()
 	s := verifyStore(t, nil)
 	s.client.(*fakeVerifyClient).indexes = indexes

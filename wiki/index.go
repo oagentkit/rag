@@ -9,7 +9,7 @@ import (
 // Indexer 是 wiki 与 rag 读侧索引的写入接缝。wiki 不做检索：页面写入后由
 // 宿主通过 Indexer 同步给既有索引后端，保证「写入返回即可检索」。
 //
-// *rag.MilvusStore 的方法集天然满足本接口（Index/DeleteFile）；文件后端与
+// *milvus.Store（向量后端子包）的方法集天然满足本接口（Index/DeleteFile）；文件后端与
 // rag.Local 共目录时，可用调用 Local.Rescan 的适配器实现。
 type Indexer interface {
 	// Index 写入/覆盖一个页面的索引。file 使用 PageFileName(slug)；返回 nil

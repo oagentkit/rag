@@ -26,10 +26,9 @@ import (
 var ragLog = logx.Delegating("oagentkit-rag")
 
 const (
-	defaultTopK = 5
 	// maxTopK 检索条数上界（#138）：topKChunks 按调用方值预分配
 	// （scored 64B/条 ⇒ 1e8 ≈ 6.4GB 直接 OOM kill），Hybrid 还 ×2。
-	// 异常入参（把字节数/配置串误当 topK）在此收口，与 defaultTopK 的
+	// 异常入参（把字节数/配置串误当 topK）在此收口，与 DefaultTopK 的
 	// 下界归一同一处——上下界都归一到 [1, maxTopK]。
 	maxTopK          = 1000
 	chunkTargetRunes = 600
@@ -85,7 +84,7 @@ func (l *Local) Retrieve(ctx context.Context, query string, topK int, filter Fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := validateFilter(filter); err != nil {
+	if err := ValidateFilter(filter); err != nil {
 		return nil, err
 	}
 	l.mu.Lock()
@@ -102,7 +101,7 @@ func (l *Local) Retrieve(ctx context.Context, query string, topK int, filter Fil
 	l.mu.Unlock()
 
 	if topK <= 0 {
-		topK = defaultTopK
+		topK = DefaultTopK
 	}
 	if topK > maxTopK {
 		topK = maxTopK // 上界收口（#138）：预分配按此值，防超大入参打爆堆
@@ -359,7 +358,7 @@ func indexMarkdownFile(rel, data string, index *[]indexedChunk, df map[string]in
 				// （ID 形态不变）——此前 Local 用原始 rel 派生，超限路径双路 ID
 				// 永不相等，FuseRRF 跨路共识静默失效。Metadata["file"] 仍存
 				// 原始 rel（Local 无列宽限制，caller 传什么过滤什么）。
-				ID:       chunkID(milvusFileStored(rel), i),
+				ID:       ChunkID(FileStored(rel), i),
 				Content:  c.content,
 				Metadata: map[string]string{"file": rel, "heading": c.heading},
 			},
@@ -771,25 +770,13 @@ func matchFilter(meta map[string]string, filter Filter) bool {
 	return true
 }
 
-// filterKeys 检索过滤字段白名单（包级单源：Local 与 Milvus 后端共用——此前
-// 白名单只在 Milvus 侧，Local 对未知 key 静默返回空结果，同一接口两后端
-// 行为相悖，配置错误被当成"没搜到"）。
-var filterKeys = map[string]bool{"file": true, "heading": true}
-
-// validateFilter 检索过滤字段校验：白名单外的 key 直接报错（fail-fast）。
-func validateFilter(filter Filter) error {
-	for k := range filter {
-		if !filterKeys[k] {
-			return fmt.Errorf("rag: 不支持的过滤字段 %q（可用: file, heading）", k)
-		}
-	}
-	return nil
-}
-
-// ChunkPreview 切块只读预览（v0.14.2）：与索引侧 chunkMarkdown 同一状态机——消费方
-// （bianque 知识文档管理面，对标 Dify/RAGFlow 分段预览）展示「这篇会切成几块、每块什么
-// 内容」，预览与实际索引不分叉。返回块内容与所属标题（Metadata["heading"]，无标题块为空）。
-func ChunkPreview(content string) []Chunk {
+// ChunkMarkdown 按标题和空行切块，返回 Chunk 形态（块内容 + 所属标题
+// Metadata["heading"]，无标题块为空）。
+//
+// 导出面（oagentkit/rag#156）：向量后端（rag/milvus 子包）的写入路径要按**同一
+// 状态机**切块——切块规则一旦两处各写一份，预览/写入/索引三方就会分叉。
+// 内部形态 mdChunk 不导出，子包只消费本函数的 Chunk 形态。
+func ChunkMarkdown(content string) []Chunk {
 	parts := chunkMarkdown(content)
 	out := make([]Chunk, 0, len(parts))
 	for _, p := range parts {
@@ -797,3 +784,10 @@ func ChunkPreview(content string) []Chunk {
 	}
 	return out
 }
+
+// ChunkPreview 切块只读预览（v0.14.2）：与索引侧 chunkMarkdown 同一状态机——消费方
+// （bianque 知识文档管理面，对标 Dify/RAGFlow 分段预览）展示「这篇会切成几块、每块什么
+// 内容」，预览与实际索引不分叉。返回块内容与所属标题（Metadata["heading"]，无标题块为空）。
+//
+// 与 ChunkMarkdown 同结果（预览语义的别名）——切块实现单源，不两处各写一份。
+func ChunkPreview(content string) []Chunk { return ChunkMarkdown(content) }

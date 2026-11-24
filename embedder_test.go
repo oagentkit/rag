@@ -162,3 +162,20 @@ func TestOpenAIEmbedderDimMismatch(t *testing.T) {
 		t.Fatal("维度不符应报错")
 	}
 }
+
+// 下面两个用例随向量后端拆子包（oagentkit/rag#156）从 milvus_test.go 归位：
+// 被测对象 OpenAIEmbedder 在根包（embedder.go），用例跟着实现走。
+func TestOpenAIEmbedderDim(t *testing.T) {
+	e := NewOpenAIEmbedder("https://api.example.com/v1", "key", "model", 128)
+	if e.Dim() != 128 {
+		t.Fatalf("Dim = %d, want 128", e.Dim())
+	}
+}
+
+func TestOpenAIEmbedderString(t *testing.T) {
+	e := NewOpenAIEmbedder("https://api.example.com/v1", "key", "model", 128)
+	s := e.String()
+	if s == "" {
+		t.Fatal("String() 不应为空")
+	}
+}
