@@ -4,6 +4,20 @@
 
 ## [v0.13.0] — 2026-11-24
 
+### 新增(ontology)：实体/关系本体层——Schema/Triple/Validate/Store 契约与判据
+
+新增 ontology 子包：实体/关系本体层的契约与判据面，不含抽取实现、不含图数据库。
+声明面：Schema/Type/Field——字段类型为 string|number|bool|ref:<Type>，Required 标必填。
+契约面：Entity（节点：名字+类型）、Triple（主体/谓词/客体/证据/置信度）。
+判据面：Validate 是纯函数——不碰 IO、不读全局状态、不改入参；结论分 9 类
+（undeclared_type / undeclared_predicate / missing_required_field / invalid_value /
+duplicate_triple / missing_evidence / conflicting_objects / incomplete / invalid_confidence）。
+同一主体+谓词指向多个客体默认报「矛盾候选」，领域允许一对多时用 AllowMultiObject() 显式关掉。
+查询面：Store 只有 Upsert + Neighbors；MemoryStore 是内存参考实现，
+Neighbors 返回确定顺序（主体/谓词/客体字典序），depth=0 空、depth=n 递归 n 跳、邻接无向。
+三条刻意边界：不做抽取（提示词留宿主）、不建图数据库（PG/Neo4j 由宿主接）、
+不引入 wiki 依赖（wiki 是叙事、ontology 是结构）。
+
 ### 重构(milvus)：向量后端挪到 rag/milvus 子包——根包不再链向量 sdk
 
 向量后端（milvus-sdk-go）此前只被根目录 milvus.go import，而根目录五个文件
@@ -28,6 +42,14 @@ gogo/protobuf 等，矩阵最重传递链）。README「向量后端可插拔」
 下游：只用本地索引/混合召回的调用方零改动；用 milvus 的改 import 路径
 github.com/oagentkit/rag/milvus，类型 MilvusStore → milvus.Store、
 MilvusConfig → milvus.Config、NewMilvusStore → milvus.NewStore，并 go mod tidy。
+
+- 文档(ontology)：模块清单补本体层与三条边界说明
+
+README 增「本体层（rag/ontology）」一节：是什么、不是什么（不做抽取、不建图库）、
+三条刻意边界、与 wiki 的分工、宿主用法示例与判据类别清单。
+AGENTS.md 的包清单补 /ontology，并把「只做契约与判据」「判据体必须是纯函数」
+「不做实体名规范化」写进仓特有纪律。
+
 
 ## [v0.12.0] — 2026-11-23
 
