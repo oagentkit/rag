@@ -7,6 +7,9 @@
 //
 // 文件由 Store.Put 生成；手工放入的 markdown 也必须带 version ≥ 1 的
 // front-matter（updated 可省略，视为零值时间）。
+//
+// 生命周期: Experimental——参考实现形态随 wiki 契约演进，未过
+// api-compat.md 晋级三维，初值如实记为不承诺兼容。
 package fsstore
 
 import (

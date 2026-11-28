@@ -1,0 +1,29 @@
+# api-lifecycle 定级清单（判据同源 matrix-tools docs/adr/ADR-002 引用的
+# yi-nology/goagent-kernel docs/api-compat.md：breaking 四类 / 三级承诺 / 晋级三维）
+# 本文件一放，matrix-tools verify_api_lifecycle 全套判定即生效（新增包必须登记）。
+version: 1
+packages:
+  - pkg: rag
+    level: Experimental
+    since: v0.14.0
+    reason: "根包（Embedder 扩展点 + OpenAI 兼容实现 + 本地索引/混合召回）；Embedder 为演进评审 2.3-问题五点名的替换面，conformance 契约套件 embedtest 已随行（判定语义有配套契约套件与负对照，晋级条件一之半）；但未过一个 minor 无 breaking 窗口、无真实宿主接入证据、无真实故障测试证据（api-compat.md 晋级三维不齐），初值如实记为不承诺兼容"
+  - pkg: embedtest
+    level: Experimental
+    since: v0.14.0
+    reason: "Embedder 共享契约套件（conformance）+ 正/负对照参考实现——场景集随判据面演进会增删，套件本身不承诺兼容（与 kernel sidetest/boardtest 同定位）；晋级三维证据未齐，初值如实记为不承诺兼容"
+  - pkg: milvus
+    level: Experimental
+    since: v0.14.0
+    reason: "Milvus 向量后端（唯一链接向量 sdk 的隔离面，rag#156）；v0.13.0 刚完成子包迁移，接口缝与配置面还会随 Milvus sdk 版本升级（v0.13 破坏点）调整；未过晋级三维，初值如实记为不承诺兼容"
+  - pkg: wiki
+    level: Experimental
+    since: v0.14.0
+    reason: "持久 wiki 写侧（页面 upsert/乐观版本/增量摄取）；页面模型与 Store 缝尚待真实宿主接入磨合；未过晋级三维，初值如实记为不承诺兼容"
+  - pkg: wiki/fsstore
+    level: Experimental
+    since: v0.14.0
+    reason: "wiki.Store 文件系统参考实现（front-matter/原子替换）；形态随 wiki 契约演进，参考实现不是对外承诺面；未过晋级三维，初值如实记为不承诺兼容"
+  - pkg: ontology
+    level: Experimental
+    since: v0.14.0
+    reason: "实体/关系本体层契约与判据（Schema/Triple/Validate/Store）；结论分类与 Validate 判据面 v0.13.0 刚立，判据刻度会随领域接入反馈调整；未过晋级三维，初值如实记为不承诺兼容"

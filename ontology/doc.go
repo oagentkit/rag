@@ -18,4 +18,7 @@
 //     （wiki 页的 front-matter 可引用实体 slug，实体页由 wiki 侧聚合）。
 //
 // 依赖面：标准库 + github.com/oekit/pkg/errors，无新增第三方依赖。
+//
+// 生命周期: Experimental——结论分类与 Validate 判据面 v0.13.0 刚立，判据刻度
+// 会随领域接入反馈调整，未过 api-compat.md 晋级三维，初值如实记为不承诺兼容。
 package ontology
