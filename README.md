@@ -13,11 +13,24 @@ go get github.com/oagentkit/rag
 | `rag/wiki` | 持久 wiki 写侧：页面 upsert/删除/乐观版本、增量摄取（`Ingest`）、结构检查（`Lint`） |
 | `rag/wiki/fsstore` | wiki 的文件系统参考实现（markdown + YAML front-matter，零外部服务） |
 | `rag/ontology` | 实体/关系本体层：类型声明（`Schema`）、抽取结果契约（`Entity`/`Triple`）、判据（`Validate`）、最小查询面（`Store` + 内存参考实现） |
+| `rag/embedtest` | Embedder 合规契约套件（conformance）：分级口径两档声明 + 批量/单条一致 + 维度/边界/错误不静默，换实现同套测试全绿 |
 
 > **向量后端在子包**：只用本地索引/混合召回的调用方 `import github.com/oagentkit/rag`
 > **不会**把 milvus sdk 及其传递依赖（cockroachdb/errors、sentry-go、gogo/protobuf 等）
 > 拖进二进制；要用向量后端才 `import github.com/oagentkit/rag/milvus`。
 > 这条性质由 `make dep-guard`（`go list -deps` 判据）机器守住。
+
+## 如何验证你的 Embedder 合规
+
+三行接入（`import "github.com/oagentkit/rag/embedtest"`；`New` 出被测实现、
+`NewFailing` 出一个必败实现、`Guarantee` 二选一声明分级口径——确定性
+`GuaranteeDeterministic` 或余弦排序一致 `GuaranteeCosineRank`）：
+
+```go
+func TestMyEmbedder(t *testing.T) {
+	embedtest.Run(t, embedtest.Contract{New: func() rag.Embedder { return my }, Guarantee: embedtest.GuaranteeDeterministic, NewFailing: func() rag.Embedder { return broken }})
+}
+```
 
 ## 定位
 

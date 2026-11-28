@@ -7,6 +7,10 @@
 // 本包任何符号（哪怕只用本地索引/混合召回）都不会把向量 sdk 及其传递依赖
 // （cockroachdb/errors、sentry-go、gogo/protobuf 等）拖进下游二进制。
 // 向量后端的装配入口是 milvus.NewStore(ctx, cfg, embedder)。
+//
+// 生命周期: Experimental——Embedder 扩展点为演进评审点名的替换面，conformance
+// 套件（embedtest）已随行；但未过 api-compat.md 晋级三维（无 breaking 窗口 /
+// 宿主接入 / 故障测试证据未齐），初值如实记为不承诺兼容。
 package rag
 
 import (
